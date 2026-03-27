@@ -6,4 +6,4 @@ Before using it, you need to input your API-Key from ZhiPuAI.
 
 ~~Nothing interesting, just for personal daily coding...~~
 
-Have Fun! Welcome to any contact!!
+Have Fun! Welcome any contact!!
