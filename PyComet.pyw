@@ -218,6 +218,73 @@ class ApiKeyDialog(QDialog):
         thread.start()
 
 
+class PackageDialog(QDialog):
+    """打包配置对话框"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("打包应用")
+        self.setModal(True)
+        self.setFixedSize(450, 200)
+        
+        # 创建布局
+        layout = QVBoxLayout(self)
+        
+        # 应用名称输入
+        name_layout = QHBoxLayout()
+        name_label = QLabel("应用名称:")
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如: PyComet")
+        self.name_input.setText("PyComet")  # 默认值
+        name_layout.addWidget(name_label)
+        name_layout.addWidget(self.name_input)
+        layout.addLayout(name_layout)
+        
+        # 图标文件选择
+        icon_layout = QHBoxLayout()
+        icon_label = QLabel("图标文件:")
+        self.icon_path_input = QLineEdit()
+        self.icon_path_input.setPlaceholderText("选择.ico图标文件 (可选)")
+        self.icon_browse_button = QPushButton("浏览...")
+        self.icon_browse_button.clicked.connect(self.browse_icon)
+        icon_layout.addWidget(icon_label)
+        icon_layout.addWidget(self.icon_path_input, 1)  # 可伸缩
+        icon_layout.addWidget(self.icon_browse_button)
+        layout.addLayout(icon_layout)
+        
+        # 提示标签
+        tip_label = QLabel("提示: 程序将使用当前编辑器代码打包，如无pyinstaller将自动安装。")
+        tip_label.setStyleSheet("color: #666; font-size: 10px;")
+        layout.addWidget(tip_label)
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.clicked.connect(self.reject)
+        self.package_button = QPushButton("开始打包")
+        self.package_button.setDefault(True)
+        self.package_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.package_button)
+        layout.addLayout(button_layout)
+        
+    def browse_icon(self):
+        """浏览并选择图标文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择图标文件", "", "图标文件 (*.ico);;所有文件 (*)"
+        )
+        if file_path:
+            self.icon_path_input.setText(file_path)
+    
+    def get_package_info(self):
+        """获取用户输入的打包信息"""
+        name = self.name_input.text().strip()
+        icon_path = self.icon_path_input.text().strip()
+        # 如果图标路径为空，返回 None
+        icon = icon_path if icon_path and os.path.exists(icon_path) else None
+        return name, icon
+
+
 class CodeEditor(QPlainTextEdit):
     """自定义代码编辑器，支持Python语法高亮和行号"""
     def __init__(self, parent=None):
@@ -876,6 +943,10 @@ class CometIDE(QMainWindow):
         self.save_as_action.setShortcut("Ctrl+Shift+S")
         self.save_as_action.triggered.connect(self.save_as_file)
         
+        # 新增：打包应用action
+        self.package_action = QAction("打包应用", self)
+        self.package_action.triggered.connect(self.package_app)
+        
         self.exit_action = QAction("退出", self)
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
@@ -1239,6 +1310,8 @@ class CometIDE(QMainWindow):
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.package_action)  # 新增打包菜单项
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         
@@ -1671,8 +1744,7 @@ class CometIDE(QMainWindow):
 {current_code}
 
 """
-
-# API配置
+        # API配置
         API_KEY = self.api_key
         URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         
@@ -1776,15 +1848,7 @@ class CometIDE(QMainWindow):
             cursor_position = cursor.position()
             cursor.movePosition(QTextCursor.StartOfLine)
             line_start_position = cursor.position()
-            cursor.setPosition(cursor_position)  # 恢复光标位置
-            
-            # 判断是否需要换行
-            if cursor_position > line_start_position:
-                # 不在行首，先换行
-                cursor.insertText('\n' + ai_code)
-            else:
-                # 在行首，直接插入
-                cursor.insertText(ai_code)
+            cursor.insertText(ai_code)
     
     def toggle_comment(self):
         """注释/取消注释当前行或选中行"""
@@ -1924,6 +1988,328 @@ class CometIDE(QMainWindow):
         """新建文件"""
         self.editor_panel.clear()
     
+    def package_app(self):
+        """打包应用程序"""
+        # 1. 获取当前代码
+        current_code = self.editor_panel.toPlainText()
+        
+        if not current_code.strip():
+            QMessageBox.warning(self, "无代码", "编辑器中没有代码，无法打包")
+            return
+        
+        # 2. 显示打包配置对话框
+        dialog = PackageDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        
+        # 3. 获取用户输入的打包信息
+        app_name, icon_path = dialog.get_package_info()
+        
+        if not app_name:
+            QMessageBox.warning(self, "输入错误", "应用名称不能为空")
+            return
+        
+        # 4. 在控制台显示开始打包信息
+        self.console_update_signal.emit("=" * 50, "normal")
+        self.console_update_signal.emit(f"开始打包应用: {app_name}", "normal")
+        self.console_update_signal.emit("=" * 50, "normal")
+        
+        # 5. 确保自动保存文件是最新的
+        try:
+            with open(".comet_ide_autosave.py", 'w', encoding='utf-8') as f:
+                f.write(current_code)
+            self.console_update_signal.emit("✓ 已更新自动保存文件: .comet_ide_autosave.py", "normal")
+        except Exception as e:
+            self.console_update_signal.emit(f"✗ 更新自动保存文件失败: {e}", "failure")
+            return
+        
+        # 6. 处理图标文件
+        icon_dest = None
+        if icon_path and os.path.exists(icon_path):
+            try:
+                import shutil
+                # 获取原始图标文件名
+                original_icon_name = os.path.basename(icon_path)
+                icon_dest = original_icon_name
+                
+                # 复制图标文件到当前目录
+                shutil.copy2(icon_path, icon_dest)
+                self.console_update_signal.emit(f"✓ 已复制图标文件: {icon_dest}", "normal")
+            except Exception as e:
+                self.console_update_signal.emit(f"✗ 复制图标文件失败: {e}", "failure")
+                # 不因为图标失败而停止打包
+                icon_dest = None
+        
+        # 7. 在新线程中执行打包
+        thread = threading.Thread(target=self.execute_packaging_thread, 
+                                 args=(app_name, icon_dest))
+        thread.daemon = True
+        thread.start()
+    
+    def execute_packaging_thread(self, app_name, icon_dest):
+        """执行打包的线程函数"""
+        try:
+            # 1. 检查pyinstaller是否已安装
+            self.console_update_signal.emit("检查pyinstaller安装状态...", "normal")
+            if not self.check_pyinstaller():
+                self.console_update_signal.emit("打包失败：pyinstaller相关错误", "failure")
+                return
+            
+            # 2. 构建pyinstaller命令
+            pyinstaller_cmd = self.build_pyinstaller_command(app_name, icon_dest)
+            
+            # 3. 执行打包命令
+            self.console_update_signal.emit("正在执行打包命令...", "normal")
+            self.console_update_signal.emit(f"命令: {' '.join(pyinstaller_cmd)}", "normal")
+            
+            success = self.run_pyinstaller_command(pyinstaller_cmd)
+            
+            if not success:
+                return
+            
+            # 4. 整理打包结果
+            self.console_update_signal.emit("整理打包结果...", "normal")
+            self.organize_package_results(app_name, icon_dest)
+            
+        except Exception as e:
+            self.console_update_signal.emit(f"打包过程发生未预期错误: {e}", "failure")
+            import traceback
+            traceback_str = traceback.format_exc()
+            self.console_update_signal.emit(f"详细错误信息: {traceback_str}", "failure")
+    
+    def check_pyinstaller(self):
+        """检查并安装pyinstaller"""
+        try:
+            # 尝试导入pyinstaller
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "show", "pyinstaller"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                self.console_update_signal.emit("✓ pyinstaller 已安装", "normal")
+                return True
+            else:
+                self.console_update_signal.emit("检测到pyinstaller未安装，正在自动安装...", "normal")
+                
+                # 安装pyinstaller
+                install_cmd = [sys.executable, "-m", "pip", "install", "pyinstaller"]
+                
+                process = subprocess.Popen(
+                    install_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1
+                )
+                
+                # 实时显示安装进度
+                for line in process.stdout:
+                    if line:
+                        self.console_update_signal.emit(line.strip(), "normal")
+                
+                process.wait()
+                
+                if process.returncode == 0:
+                    self.console_update_signal.emit("✓ pyinstaller 安装成功", "success")
+                    return True
+                else:
+                    error_output = process.stderr.read()
+                    self.console_update_signal.emit(f"✗ pyinstaller 安装失败: {error_output}", "failure")
+                    return False
+                    
+        except subprocess.TimeoutExpired:
+            self.console_update_signal.emit("✗ 检查pyinstaller超时", "failure")
+            return False
+        except Exception as e:
+            self.console_update_signal.emit(f"✗ 检查pyinstaller时发生错误: {e}", "failure")
+            return False
+    
+    def build_pyinstaller_command(self, app_name, icon_dest):
+        """构建pyinstaller命令"""
+        cmd = ["pyinstaller"]
+        
+        # 添加基本参数
+        cmd.extend([
+            "--windowed",   # 窗口应用
+            "--onefile",    # 单文件
+            "--clean",      # 清理缓存
+            "--noconfirm",  # 不确认覆盖
+        ])
+        
+        # 添加名称参数
+        cmd.append(f'--name="{app_name}"')
+        
+        # 添加图标参数（如果提供了图标文件）
+        if icon_dest and os.path.exists(icon_dest):
+            cmd.append(f'--icon="{icon_dest}"')
+            # 添加数据文件
+            cmd.append(f'--add-data "{icon_dest};."')
+        
+        # 添加主文件（使用自动保存文件）
+        cmd.append(".comet_ide_autosave.py")
+        
+        return cmd
+    
+    def run_pyinstaller_command(self, cmd):
+        """执行pyinstaller命令"""
+        import subprocess
+        import shlex
+        
+        # 在Windows上需要将命令列表转换为字符串
+        if platform.system() == "Windows":
+            # 在Windows上，我们需要特殊处理包含空格的参数
+            cmd_str = " ".join(cmd)
+            process = subprocess.Popen(
+                cmd_str,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            # 在非Windows系统上
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+        
+        # 创建线程来读取输出
+        def read_output(stream, output_type="stdout"):
+            for line in stream:
+                if line:
+                    # 过滤掉一些冗长的信息
+                    if "INFO:" in line and "PyInstaller" in line:
+                        continue
+                    if "DEBUG:" in line:
+                        continue
+                    
+                    line = line.rstrip()
+                    if output_type == "stderr" and "WARNING:" not in line:
+                        self.console_update_signal.emit(f"错误: {line}", "failure")
+                    elif "WARNING:" in line:
+                        self.console_update_signal.emit(f"警告: {line.replace('WARNING:', '').strip()}", "normal")
+                    elif "INFO:" in line:
+                        self.console_update_signal.emit(f"信息: {line.replace('INFO:', '').strip()}", "normal")
+                    else:
+                        self.console_update_signal.emit(line, "normal")
+        
+        stdout_thread = threading.Thread(target=read_output, args=(process.stdout, "stdout"))
+        stderr_thread = threading.Thread(target=read_output, args=(process.stderr, "stderr"))
+        stdout_thread.daemon = True
+        stderr_thread.daemon = True
+        stdout_thread.start()
+        stderr_thread.start()
+        
+        # 等待进程结束
+        process.wait()
+        
+        # 等待输出线程结束
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        
+        if process.returncode == 0:
+            self.console_update_signal.emit("✓ 打包命令执行成功", "success")
+            return True
+        else:
+            self.console_update_signal.emit(f"✗ 打包命令执行失败，返回码: {process.returncode}", "failure")
+            return False
+    
+    def organize_package_results(self, app_name, icon_dest):
+        """整理打包结果"""
+        try:
+            import shutil
+            import os
+            
+            # 1. 创建项目文件夹
+            project_folder = app_name
+            if os.path.exists(project_folder):
+                # 如果文件夹已存在，先删除
+                shutil.rmtree(project_folder)
+            
+            os.makedirs(project_folder, exist_ok=True)
+            self.console_update_signal.emit(f"✓ 创建项目文件夹: {project_folder}", "normal")
+            
+            # 2. 检查打包生成的文件
+            files_to_move = []
+            
+            # 检查dist文件夹
+            dist_folder = "dist"
+            if os.path.exists(dist_folder):
+                exe_file = os.path.join(dist_folder, f"{app_name}.exe")
+                if os.path.exists(exe_file):
+                    # 移动整个dist文件夹
+                    dest_dist = os.path.join(project_folder, "dist")
+                    shutil.move(dist_folder, dest_dist)
+                    files_to_move.append("dist")
+                    
+                    # 显示可执行文件信息
+                    file_size = os.path.getsize(os.path.join(dest_dist, f"{app_name}.exe")) / (1024 * 1024)
+                    self.console_update_signal.emit(f"✓ 可执行文件: {app_name}.exe ({file_size:.2f} MB)", "success")
+                else:
+                    # 如果没找到exe文件，但dist文件夹存在，仍然移动
+                    dest_dist = os.path.join(project_folder, "dist")
+                    shutil.move(dist_folder, dest_dist)
+                    files_to_move.append("dist")
+            else:
+                self.console_update_signal.emit("✗ 未找到dist文件夹", "failure")
+            
+            # 3. 检查build文件夹
+            build_folder = "build"
+            if os.path.exists(build_folder):
+                dest_build = os.path.join(project_folder, "build")
+                shutil.move(build_folder, dest_build)
+                files_to_move.append("build")
+            
+            # 4. 检查.spec文件
+            spec_file = f"{app_name}.spec"
+            if os.path.exists(spec_file):
+                dest_spec = os.path.join(project_folder, spec_file)
+                shutil.move(spec_file, dest_spec)
+                files_to_move.append(spec_file)
+            
+            # 5. 移动图标文件到dist文件夹
+            if icon_dest and os.path.exists(icon_dest):
+                # 先检查dist是否已移动到项目文件夹
+                project_dist = os.path.join(project_folder, "dist")
+                if os.path.exists(project_dist):
+                    dest_icon = os.path.join(project_dist, icon_dest)
+                    shutil.move(icon_dest, dest_icon)
+                    self.console_update_signal.emit(f"✓ 图标文件已移动到: {dest_icon}", "normal")
+                else:
+                    # 如果dist不在项目文件夹，就放在当前目录
+                    self.console_update_signal.emit(f"图标文件保留在: {icon_dest}", "normal")
+            
+            # 6. 输出最终结果
+            if files_to_move:
+                self.console_update_signal.emit("=" * 50, "normal")
+                self.console_update_signal.emit(f"✓ 打包完成！", "success")
+                self.console_update_signal.emit(f"项目文件夹: {project_folder}", "normal")
+                self.console_update_signal.emit(f"已包含: {', '.join(files_to_move)}", "normal")
+                
+                # 显示可执行文件路径
+                exe_path = os.path.join(project_folder, "dist", f"{app_name}.exe")
+                if os.path.exists(exe_path):
+                    self.console_update_signal.emit(f"可执行文件: {exe_path}", "normal")
+                
+                self.console_update_signal.emit("=" * 50, "normal")
+            else:
+                self.console_update_signal.emit("✗ 未找到任何打包生成的文件", "failure")
+                
+        except Exception as e:
+            self.console_update_signal.emit(f"✗ 整理打包结果时发生错误: {e}", "failure")
+            import traceback
+            traceback_str = traceback.format_exc()
+            self.console_update_signal.emit(f"详细错误: {traceback_str}", "failure")
+            
     def show_about(self):
         """显示关于对话框"""
         about_text = """
@@ -1940,6 +2326,7 @@ class CometIDE(QMainWindow):
             <li>支持交互式输入 - 通过外部终端</li>
             <li>强制停止运行功能</li>
             <li>常用编辑快捷键</li>
+            <li>应用打包功能</li>
         </ul>
         <p>© 2026 PyComet</p>
         """
@@ -1955,6 +2342,7 @@ class CometIDE(QMainWindow):
         <ul>
             <li><b>运行代码:</b> 点击菜单栏的运行->运行代码或按Ctrl+Enter</li>
             <li><b>打开文件:</b> 点击菜单栏的文件->打开或按Ctrl+O</li>
+            <li><b>打包应用:</b> 点击菜单栏的文件->打包应用</li>
         </ul>
         
         <h3>编辑快捷键:</h3>
@@ -1993,6 +2381,14 @@ class CometIDE(QMainWindow):
             <li>当程序正在运行时，控制台标题栏右侧会显示⏹️停止按钮</li>
             <li>点击按钮可强制停止正在运行的程序</li>
             <li>适用于长时间运行或陷入死循环的程序</li>
+        </ul>
+        
+        <h3>打包功能:</h3>
+        <ul>
+            <li>可将当前编辑器中的代码打包为独立的可执行文件</li>
+            <li>支持自定义应用名称和图标</li>
+            <li>自动检测并安装pyinstaller（如未安装）</li>
+            <li>生成单文件可执行程序，方便分发</li>
         </ul>
         
         <h3>文件保存:</h3>
