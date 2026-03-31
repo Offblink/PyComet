@@ -10,4 +10,4 @@ Have Fun! Welcome any contact!!
 
 # 4.1
 
-➕️ Intelligent 智能代码补全 function
+➕️ Intelligent 代码补全 function
