@@ -7,7 +7,9 @@ import tempfile
 import time
 import platform
 import base64
+import re
 from datetime import datetime
+from collections import OrderedDict
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
@@ -16,73 +18,160 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 
+# # 注册QItemSelection为元类型以消除警告
+# qRegisterMetaType('QItemSelection')
 
 class AESHelper:
     """AES加密辅助类"""
-    
     def __init__(self, key):
-        """初始化AES加密器
-        
-        Args:
-            key: 加密密钥，将使用SHA256哈希生成32字节密钥
-        """
-        # 使用SHA256生成32字节密钥
         from hashlib import sha256
         self.key = sha256(key.encode('utf-8')).digest()
     
     def encrypt(self, plaintext):
-        """加密文本
-        
-        Args:
-            plaintext: 明文文本
-            
-        Returns:
-            包含IV和密文的base64编码字符串
-        """
-        # 生成随机IV
         iv = get_random_bytes(AES.block_size)
-        
-        # 创建AES加密器
         cipher = AES.new(self.key, AES.MODE_CBC, iv)
-        
-        # 加密数据
         ciphertext = cipher.encrypt(pad(plaintext.encode('utf-8'), AES.block_size))
-        
-        # 返回IV+密文的base64编码
         return base64.b64encode(iv + ciphertext).decode('utf-8')
     
     def decrypt(self, encrypted_text):
-        """解密文本
-        
-        Args:
-            encrypted_text: 包含IV和密文的base64编码字符串
-            
-        Returns:
-            解密后的明文文本
-        """
         try:
-            # 解码base64
             data = base64.b64decode(encrypted_text)
-            
-            # 提取IV和密文
             iv = data[:AES.block_size]
             ciphertext = data[AES.block_size:]
-            
-            # 创建AES解密器
             cipher = AES.new(self.key, AES.MODE_CBC, iv)
-            
-            # 解密并去除填充
             plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size)
-            
             return plaintext.decode('utf-8')
         except Exception as e:
             print(f"解密失败: {e}")
             return ""
 
+class AutoCompleter(QObject):
+    """关键词自动补全管理器"""
+    trigger_completion = pyqtSignal(str, int, list)  # 搜索字段, 光标位置, 候选词列表
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 静态关键词集合：Python关键字和常用内置函数/类型
+        self.static_keywords = set([
+            'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def',
+            'del', 'elif', 'else', 'except', 'False', 'finally', 'for', 'from', 'global',
+            'if', 'import', 'in', 'is', 'lambda', 'None', 'nonlocal', 'not', 'or', 'pass',
+            'raise', 'return', 'True', 'try', 'while', 'with', 'yield',
+            'abs', 'all', 'any', 'ascii', 'bin', 'bool', 'bytearray', 'bytes', 'callable',
+            'chr', 'classmethod', 'compile', 'complex', 'delattr', 'dict', 'dir', 'divmod',
+            'enumerate', 'eval', 'exec', 'filter', 'float', 'format', 'frozenset', 'getattr',
+            'hasattr', 'hash', 'help', 'hex', 'id', 'input', 'int', 'isinstance', 'issubclass',
+            'iter', 'len', 'list', 'locals', 'map', 'max', 'memoryview', 'min', 'next',
+            'object', 'oct', 'open', 'ord', 'pow', 'print', 'property', 'range', 'repr',
+            'reversed', 'round', 'set', 'setattr', 'slice', 'sorted', 'staticmethod', 'str',
+            'sum', 'super', 'tuple', 'type', 'vars', 'zip', '__import__',
+            'ArithmeticError', 'AssertionError', 'AttributeError', 'BaseException',
+            'BlockingIOError', 'BrokenPipeError', 'BufferError', 'BytesWarning',
+            'ChildProcessError', 'ConnectionAbortedError', 'ConnectionError',
+            'ConnectionRefusedError', 'ConnectionResetError', 'DeprecationWarning',
+            'EOFError', 'Ellipsis', 'EnvironmentError', 'Exception', 'FileExistsError',
+            'FileNotFoundError', 'FloatingPointError', 'FutureWarning', 'GeneratorExit',
+            'IOError', 'ImportError', 'ImportWarning', 'IndentationError', 'IndexError',
+            'InterruptedError', 'IsADirectoryError', 'KeyError', 'KeyboardInterrupt',
+            'LookupError', 'MemoryError', 'ModuleNotFoundError', 'NameError', 'NotImplemented',
+            'NotImplementedError', 'OSError', 'OverflowError', 'PendingDeprecationWarning',
+            'PermissionError', 'ProcessLookupError', 'RecursionError', 'ReferenceError',
+            'ResourceWarning', 'RuntimeError', 'RuntimeWarning', 'StopAsyncIteration',
+            'StopIteration', 'SyntaxError', 'SyntaxWarning', 'SystemError', 'SystemExit',
+            'TabError', 'TimeoutError', 'TypeError', 'UnboundLocalError', 'UnicodeDecodeError',
+            'UnicodeEncodeError', 'UnicodeError', 'UnicodeTranslateError', 'UnicodeWarning',
+            'UserWarning', 'ValueError', 'Warning', 'ZeroDivisionError',
+            'BaseExceptionGroup', 'ExceptionGroup',
+        ])
+        # 动态关键词集合（从当前文档上下文提取）
+        self.dynamic_keywords = set()
+        # 代码分隔符（用于分词） - 注意：下划线是标识符的一部分
+        self.word_delimiters = set(' \t\n\r\f\v!@#$%^&*()-=+[]{}|;:\'",.<>/?`~')
+        # Python关键字列表，用于过滤
+        self.python_keywords = {
+            'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 
+            'def', 'del', 'elif', 'else', 'except', 'False', 'finally', 'for', 
+            'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'None', 
+            'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'True', 'try', 
+            'while', 'with', 'yield'
+        }
+        # 合并的关键词集合（用于查询）
+        self.all_keywords = set(self.static_keywords)
+        
+    def update_from_text(self, text):
+        """从给定文本中提取关键词，更新动态集合 - 改进版"""
+        # 清空动态集合，重新构建
+        self.dynamic_keywords.clear()
+        
+        # 使用正则表达式匹配完整的Python标识符
+        import re
+        # Python标识符正则：以字母或下划线开头，后跟字母、数字、下划线
+        identifier_pattern = r'\b[a-zA-Z_][a-zA-Z0-9_]*\b'
+        
+        # 找到所有标识符
+        identifiers = re.findall(identifier_pattern, text)
+        
+        # 过滤：只保留长度>=3的标识符，排除Python关键字和静态关键词
+        new_words = {w for w in identifiers 
+                     if len(w) >= 3  # 只收录长度>=3的标识符
+                     and w not in self.python_keywords
+                     and w not in self.static_keywords}
+        
+        self.dynamic_keywords.update(new_words)
+        # 更新总集合
+        self.all_keywords = set(self.static_keywords) | self.dynamic_keywords
+        
+    def get_completions(self, search_field):
+        """根据搜索字段获取补全候选词列表 - 改进版，解决s,sa问题"""
+        if not search_field:
+            return []
+            
+        search_field_lower = search_field.lower()
+        completions = []
+        
+        for word in self.all_keywords:
+            word_lower = word.lower()
+            
+            # 1. 精确前缀匹配（最高优先级）
+            if word_lower.startswith(search_field_lower):
+                # 计算匹配度：搜索字段长度/单词长度
+                match_ratio = len(search_field) / len(word)
+                completions.append((word, 0, match_ratio, len(word)))
+        
+        # 如果没有精确前缀匹配，再进行子序列模糊匹配
+        if not completions:
+            for word in self.all_keywords:
+                word_lower = word.lower()
+                
+                # 2. 子序列模糊匹配（低优先级）
+                if self._is_subsequence(search_field_lower, word_lower):
+                    match_ratio = len(search_field_lower) / len(word_lower)
+                    completions.append((word, 1, match_ratio, len(word)))
+        
+        # 排序：先按优先级，再按匹配度（降序），再按单词长度（升序），最后按字母顺序
+        completions.sort(key=lambda x: (x[1], -x[2], x[3], x[0].lower()))
+        
+        # 返回去重后的单词列表
+        seen = set()
+        result = []
+        for word, _, _, _ in completions:
+            if word not in seen:
+                seen.add(word)
+                result.append(word)
+        return result[:15]  # 最多返回15个
+    
+    def _is_subsequence(self, needle, haystack):
+        """检查needle是否是haystack的子序列（模糊匹配）"""
+        it = iter(haystack)
+        return all(ch in it for ch in needle)
+        
+    def clear_dynamic(self):
+        """清空动态关键词集合"""
+        self.dynamic_keywords.clear()
+        self.all_keywords = set(self.static_keywords)
 
 class ApiKeyDialog(QDialog):
     """API密钥设置对话框"""
-    # 在ApiKeyDialog类的__init__方法中，修改API密钥输入框的部分
     def __init__(self, parent=None, current_key=""):
         super().__init__(parent)
         self.setWindowTitle("设置API密钥")
@@ -105,7 +194,7 @@ class ApiKeyDialog(QDialog):
         self.api_key_input.setText(current_key)
         self.api_key_input.setEchoMode(QLineEdit.Password)  # 设置为密码模式
         
-        # === 新增：创建🙈按钮 ===
+        # 创建🙈按钮
         self.show_password_button = QPushButton("🙈")
         self.show_password_button.setFixedSize(30, 30)
         self.show_password_button.setToolTip("显示/隐藏密码")
@@ -153,14 +242,14 @@ class ApiKeyDialog(QDialog):
         self.password_visible = False
 
     def toggle_password_visibility(self):
-        """切换密码可见性 - 动漫风格"""
+        """切换密码可见性"""
         if self.password_visible:
             self.api_key_input.setEchoMode(QLineEdit.Password)
-            self.show_password_button.setText("🙈")  # 闭眼
+            self.show_password_button.setText("🙈")
             self.password_visible = False
         else:
             self.api_key_input.setEchoMode(QLineEdit.Normal)
-            self.show_password_button.setText("👀")  # 睁眼
+            self.show_password_button.setText("👀")
             self.password_visible = True
         
     def get_api_key(self):
@@ -283,15 +372,40 @@ class PackageDialog(QDialog):
         # 如果图标路径为空，返回 None
         icon = icon_path if icon_path and os.path.exists(icon_path) else None
         return name, icon
-
-
+        
 class CodeEditor(QPlainTextEdit):
-    """自定义代码编辑器，支持Python语法高亮和行号"""
+    """自定义代码编辑器，支持Python语法高亮、行号、自动补全和字体缩放"""
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFont(QFont("Consolas", 10))
+        self.default_font_size = 10
+        self.current_font_size = 10
         
-        # 不在这里设置主题，由主窗口统一设置
+        # 自动补全相关
+        self.completer = AutoCompleter(self)
+        self.completion_list = QListWidget()
+        self.completion_list.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.completion_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                border-bottom: 1px solid #3c3c3c;
+            }
+            QListWidget::item {
+                padding: 3px 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #264f78;
+            }
+            QListWidget::item:hover {
+                background-color: #2a2d2e;
+            }
+        """)
+        self.completion_list.itemClicked.connect(self.insert_completion)
+        self.completion_prefix = ""
+        self.completion_start_pos = 0
         
         # 行号区域
         self.line_number_area = LineNumberArea(self)
@@ -302,6 +416,14 @@ class CodeEditor(QPlainTextEdit):
         # 初始化语法高亮
         self.highlighter = PythonHighlighter(self.document())
         
+        # 文本变化时更新动态关键词
+        self.textChanged.connect(self.on_text_changed)
+        
+    def on_text_changed(self):
+        """文本变化时，更新自动补全器的动态关键词集合"""
+        full_text = self.toPlainText()
+        self.completer.update_from_text(full_text)
+    
     def apply_dark_theme(self):
         """应用深色主题"""
         self.setStyleSheet("""
@@ -309,6 +431,26 @@ class CodeEditor(QPlainTextEdit):
                 background-color: #1e1e1e;
                 color: #d4d4d4;
                 selection-background-color: #264f78;
+                border: 1px solid #3c3c3c;
+                border-bottom: 1px solid #3c3c3c;
+            }
+        """)
+        # 设置补全列表的深色主题
+        self.completion_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                border-bottom: 1px solid #3c3c3c;
+            }
+            QListWidget::item {
+                padding: 3px 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #264f78;
+            }
+            QListWidget::item:hover {
+                background-color: #2a2d2e;
             }
         """)
     
@@ -319,9 +461,303 @@ class CodeEditor(QPlainTextEdit):
                 background-color: #ffffff;
                 color: #000000;
                 selection-background-color: #a8d1ff;
+                border: 1px solid #cccccc;
+                border-bottom: 1px solid #cccccc;
             }
         """)
+        # 设置补全列表的浅色主题
+        self.completion_list.setStyleSheet("""
+            QListWidget {
+                background-color: #ffffff;
+                color: #333333;
+                border: 1px solid #cccccc;
+                border-bottom: 1px solid #cccccc;
+            }
+            QListWidget::item {
+                padding: 3px 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #a8d1ff;
+            }
+            QListWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+        """)
+    
+    def show_completion_list(self, completions):
+        """显示补全列表"""
+        if not completions:
+            self.hide_completion_list()
+            return
+            
+        self.completion_list.clear()
+        for word in completions:
+            self.completion_list.addItem(word)
         
+        # 设置列表大小
+        self.completion_list.setMaximumHeight(200)
+        self.completion_list.setMinimumWidth(200)
+        self.completion_list.setMaximumWidth(400)
+        
+        # 获取光标位置
+        cursor_rect = self.cursorRect()
+        bottom_left = self.mapToGlobal(cursor_rect.bottomLeft())
+        
+        # 确保补全列表不会超出屏幕
+        screen_rect = QApplication.desktop().availableGeometry()
+        list_width = self.completion_list.sizeHint().width()
+        list_height = min(200, self.completion_list.sizeHintForRow(0) * len(completions) + 10)
+        
+        # 调整位置
+        if bottom_left.x() + list_width > screen_rect.right():
+            bottom_left.setX(screen_rect.right() - list_width)
+        if bottom_left.y() + list_height > screen_rect.bottom():
+            bottom_left.setY(bottom_left.y() - list_height - cursor_rect.height())
+        
+        # 显示列表
+        self.completion_list.move(bottom_left)
+        self.completion_list.resize(list_width, list_height)
+        self.completion_list.show()
+        self.completion_list.setCurrentRow(0)
+    
+    def hide_completion_list(self):
+        """隐藏补全列表"""
+        self.completion_list.hide()
+    
+    def insert_completion(self, item):
+        """插入选中的补全词"""
+        if not item:
+            return
+            
+        completion = item.text()
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        
+        # 删除已输入的部分
+        cursor.setPosition(self.completion_start_pos)
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 
+                          len(self.completion_prefix))
+        cursor.removeSelectedText()
+        
+        # 插入完整的词
+        cursor.insertText(completion)
+        self.setTextCursor(cursor)
+        cursor.endEditBlock()
+        
+        self.hide_completion_list()
+    
+    def get_word_under_cursor(self):
+        """获取光标处的完整标识符 - 改进版"""
+        cursor = self.textCursor()
+        
+        # 保存当前光标位置
+        original_position = cursor.position()
+        
+        # 向前查找标识符起始位置
+        cursor.movePosition(QTextCursor.WordLeft, QTextCursor.KeepAnchor)
+        word_left = cursor.selectedText()
+        
+        # 恢复光标位置
+        cursor.setPosition(original_position)
+        
+        # 向后查找标识符结束位置
+        cursor.movePosition(QTextCursor.WordRight, QTextCursor.KeepAnchor)
+        word_right = cursor.selectedText()
+        
+        # 恢复光标位置
+        cursor.setPosition(original_position)
+        
+        # 合并左右两部分的单词
+        if word_left and word_right and word_left[-1:] != word_right[:1]:
+            # 如果有重叠部分，合并
+            combined_word = word_left + word_right
+        elif word_left:
+            combined_word = word_left
+        else:
+            combined_word = word_right
+        
+        # 清理单词，只保留有效的标识符字符
+        combined_word = combined_word.strip()
+        
+        # 移除可能的分隔符
+        for delimiter in self.completer.word_delimiters:
+            combined_word = combined_word.strip(delimiter)
+        
+        return combined_word, original_position - len(combined_word)
+    
+    def _is_identifier_char(self, char):
+        """检查字符是否可以作为Python标识符的一部分"""
+        return char.isalnum() or char == '_'
+    
+    def _is_valid_identifier(self, word):
+        """检查单词是否是有效的Python标识符"""
+        if not word or len(word) < 1:
+            return False
+        
+        # Python标识符规则：以字母或下划线开头，后跟字母、数字、下划线
+        if not (word[0].isalpha() or word[0] == '_'):
+            return False
+        
+        # 检查后续字符
+        for char in word[1:]:
+            if not (char.isalnum() or char == '_'):
+                return False
+        
+        return True
+    
+    def keyPressEvent(self, event):
+        """处理键盘事件，支持自动补全和字体缩放"""
+        # 处理字体缩放快捷键
+        if event.modifiers() & Qt.ControlModifier:
+            if event.key() == Qt.Key_Plus or event.key() == Qt.Key_Equal:
+                self.zoom_in()
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Minus:
+                self.zoom_out()
+                event.accept()
+                return
+        
+        # 如果补全列表显示，处理导航键
+        if self.completion_list.isVisible():
+            if event.key() == Qt.Key_Up:
+                current_row = self.completion_list.currentRow()
+                if current_row > 0:
+                    self.completion_list.setCurrentRow(current_row - 1)
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Down:
+                current_row = self.completion_list.currentRow()
+                if current_row < self.completion_list.count() - 1:
+                    self.completion_list.setCurrentRow(current_row + 1)
+                event.accept()
+                return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                current_item = self.completion_list.currentItem()
+                if current_item:
+                    self.insert_completion(current_item)
+                event.accept()
+                return
+            elif event.key() == Qt.Key_Escape:
+                self.hide_completion_list()
+                event.accept()
+                return
+            elif event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
+                self.hide_completion_list()
+                # 继续处理删除操作
+            elif event.key() in (Qt.Key_Space, Qt.Key_Tab, Qt.Key_ParenLeft, 
+                               Qt.Key_ParenRight, Qt.Key_BracketLeft, Qt.Key_BracketRight,
+                               Qt.Key_BraceLeft, Qt.Key_BraceRight, Qt.Key_Comma, 
+                               Qt.Key_Colon, Qt.Key_Period, Qt.Key_Semicolon):
+                # 输入分隔符时隐藏补全列表并插入该字符
+                self.hide_completion_list()
+                super().keyPressEvent(event)
+                return
+        
+        # 处理原有快捷键
+        if event.key() == Qt.Key_Tab:
+            if event.modifiers() & Qt.ControlModifier:
+                self.unindent_selection()
+            else:
+                self.indent_selection()
+        elif event.key() == Qt.Key_Return and event.modifiers() & Qt.ControlModifier:
+            self.parent().run_code()
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # 原有自动缩进逻辑
+            cursor = self.textCursor()
+            current_pos = cursor.position()
+            
+            cursor.movePosition(QTextCursor.StartOfLine)
+            cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+            current_line_text = cursor.selectedText()
+            
+            cursor.setPosition(current_pos)
+            
+            indent_count = 0
+            for ch in current_line_text:
+                if ch == ' ':
+                    indent_count += 1
+                else:
+                    break
+            
+            cursor.movePosition(QTextCursor.StartOfLine)
+            cursor.movePosition(QTextCursor.Up)
+            cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
+            prev_line_text = cursor.selectedText().rstrip()
+            
+            cursor.setPosition(current_pos)
+            super().keyPressEvent(event)
+            
+            if prev_line_text.endswith(':'):
+                cursor.insertText(' ' * (indent_count + 4))
+            else:
+                cursor.insertText(' ' * indent_count)
+        else:
+            # 先调用父类处理输入
+            super().keyPressEvent(event)
+            
+            # 检查是否需要显示补全列表
+            if not event.text():
+                return
+                
+            # 获取当前词
+            search_field, start_pos = self.get_word_under_cursor()
+            if len(search_field) >= 1:  # 输入至少1个字符后触发
+                # 检查是否是有效的标识符
+                if not self._is_valid_identifier(search_field):
+                    self.hide_completion_list()
+                    return
+                    
+                self.completion_prefix = search_field
+                self.completion_start_pos = start_pos
+                completions = self.completer.get_completions(search_field)
+                self.show_completion_list(completions)
+            else:
+                self.hide_completion_list()
+    
+    def zoom_in(self):
+        """放大字体"""
+        if self.current_font_size < 30:  # 设置最大字体大小
+            self.current_font_size += 1
+            font = self.font()
+            font.setPointSize(self.current_font_size)
+            self.setFont(font)
+            self.line_number_area.update()
+    
+    def zoom_out(self):
+        """缩小字体"""
+        if self.current_font_size > 6:  # 设置最小字体大小
+            self.current_font_size -= 1
+            font = self.font()
+            font.setPointSize(self.current_font_size)
+            self.setFont(font)
+            self.line_number_area.update()
+    
+    def reset_zoom(self):
+        """重置字体大小"""
+        self.current_font_size = self.default_font_size
+        font = self.font()
+        font.setPointSize(self.current_font_size)
+        self.setFont(font)
+        self.line_number_area.update()
+    
+    def wheelEvent(self, event):
+        """处理鼠标滚轮事件，支持Ctrl+滚轮缩放"""
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+    
+    def focusOutEvent(self, event):
+        """失去焦点时隐藏补全列表"""
+        self.hide_completion_list()
+        super().focusOutEvent(event)
+    
     def line_number_area_width(self):
         """计算行号区域的宽度"""
         digits = len(str(max(1, self.blockCount())))
@@ -355,7 +791,6 @@ class CodeEditor(QPlainTextEdit):
         """绘制行号"""
         painter = QPainter(self.line_number_area)
         
-        # 根据主题设置行号区域颜色
         if is_dark_theme:
             painter.fillRect(event.rect(), QColor("#252526"))
             pen_color = QColor("#858585")
@@ -480,62 +915,6 @@ class CodeEditor(QPlainTextEdit):
                 # 删除空格
                 cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, space_count)
                 cursor.removeSelectedText()
-    
-    def keyPressEvent(self, event):
-        """处理键盘事件，特别是Tab、Ctrl+Tab和自动缩进"""
-        if event.key() == Qt.Key_Tab:
-            if event.modifiers() & Qt.ControlModifier:  # Ctrl+Tab 减少缩进
-                self.unindent_selection()
-            else:  # Tab 增加缩进
-                self.indent_selection()
-        elif event.key() == Qt.Key_Return and event.modifiers() & Qt.ControlModifier:
-            # Ctrl+Enter 运行代码
-            self.parent().run_code()
-        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            # 处理回车键，实现自动缩进
-            cursor = self.textCursor()
-            
-            # 保存当前光标位置
-            current_pos = cursor.position()
-            
-            # 移动到当前行的开始，然后选中到行首，获取当前行的缩进
-            cursor.movePosition(QTextCursor.StartOfLine)
-            cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
-            current_line_text = cursor.selectedText()
-            
-            # 将光标恢复到原始位置
-            cursor.setPosition(current_pos)
-            
-            # 计算当前行的缩进（空格数量）
-            indent_count = 0
-            for ch in current_line_text:
-                if ch == ' ':
-                    indent_count += 1
-                else:
-                    break
-            
-            # 检查上一行是否以冒号结尾
-            cursor.movePosition(QTextCursor.StartOfLine)
-            cursor.movePosition(QTextCursor.Up)
-            cursor.movePosition(QTextCursor.EndOfLine, QTextCursor.KeepAnchor)
-            prev_line_text = cursor.selectedText().rstrip()  # 去除行尾空白
-            
-            # 恢复光标到准备插入新行的位置
-            cursor.setPosition(current_pos)
-            # 插入换行符（这会触发父类的默认换行行为）
-            super().keyPressEvent(event)
-            
-            # 现在光标在新行的开头，为其设置缩进
-            if prev_line_text.endswith(':'):
-                # 以冒号结尾，增加一级缩进
-                cursor.insertText(' ' * (indent_count + 4))
-            else:
-                # 不是以冒号结尾，保持相同缩进
-                cursor.insertText(' ' * indent_count)
-        else:
-            # 其他按键交给父类处理
-            super().keyPressEvent(event)
-
 
 class LineNumberArea(QWidget):
     """行号区域部件"""
@@ -609,28 +988,27 @@ class PythonHighlighter(QSyntaxHighlighter):
                 index = expression.indexIn(text, index + length)
         
         self.setCurrentBlockState(0)
-
-
+        
 class CometIDE(QMainWindow):
     """彗星IDE主窗口"""
     
     # 定义信号用于线程间通信
-    console_update_signal = pyqtSignal(str, str)  # 第二个参数表示颜色
+    console_update_signal = pyqtSignal(str, str)
     comet_response_signal = pyqtSignal(str)
     comet_error_signal = pyqtSignal(str)
     request_finished_signal = pyqtSignal()
-    process_finished_signal = pyqtSignal()  # 新增：进程完成信号
+    process_finished_signal = pyqtSignal()
     
     def __init__(self):
         super().__init__()
-        self.current_theme = "dark"  # 当前主题，默认为深色
-        self.current_running_code = ""  # 保存当前运行的代码
-        self.is_fix_mode = False  # 是否为修复模式
-        self.has_error = False  # 标记是否有错误信息
-        self.input_process = None  # 交互式执行的子进程
-        self.input_thread = None  # 读取输出的线程
-        self.is_running = False  # 标记是否有进程正在运行
-        self.non_interactive_process = None  # 非交互式执行的进程
+        self.current_theme = "dark"
+        self.current_running_code = ""
+        self.is_fix_mode = False
+        self.has_error = False
+        self.input_process = None
+        self.input_thread = None
+        self.is_running = False
+        self.non_interactive_process = None
         
         # 初始化AES加密器
         self.aes_helper = AESHelper("zy142857")
@@ -641,6 +1019,10 @@ class CometIDE(QMainWindow):
         # 如果没有API密钥或密钥无效，提示用户设置
         if not self.api_key or not self.test_api_key(self.api_key):
             self.show_api_key_dialog()
+        
+        # 加载对话历史
+        self.conversation_history = self.load_conversation_history()
+        self.current_conversation_id = None
         
         # 先创建UI部件
         self.init_ui()
@@ -660,8 +1042,342 @@ class CometIDE(QMainWindow):
         self.comet_response_signal.connect(self.update_comet_response)
         self.comet_error_signal.connect(self.update_comet_error)
         self.request_finished_signal.connect(self.enable_send_button)
-        self.process_finished_signal.connect(self.on_process_finished)  # 新增
+        self.process_finished_signal.connect(self.on_process_finished)
     
+    def load_conversation_history(self):
+        """从文件加载对话历史"""
+        history_file = "comet_history.json"
+        if os.path.exists(history_file):
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    # 使用OrderedDict保持插入顺序
+                    data = json.load(f, object_pairs_hook=OrderedDict)
+                    return data
+            except:
+                return OrderedDict()
+        return OrderedDict()
+    
+    def save_conversation_history(self):
+        """保存对话历史到文件"""
+        history_file = "comet_history.json"
+        try:
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.conversation_history, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"保存对话历史失败: {e}")
+            return False
+    
+    def add_to_history(self, user_input, ai_response):
+        """添加对话到历史记录"""
+        from datetime import datetime
+        history_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 限制历史记录数量，最多保存50条
+        if len(self.conversation_history) >= 50:
+            # 删除最早的一条
+            oldest_id = next(iter(self.conversation_history))
+            del self.conversation_history[oldest_id]
+        
+        self.conversation_history[history_id] = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "user": user_input,
+            "ai": ai_response
+        }
+        
+        # 保存到文件
+        self.save_conversation_history()
+        
+        # 更新历史列表显示
+        self.update_history_list()
+        
+        return history_id
+    
+    def update_history_list(self):
+        """更新历史记录列表显示"""
+        self.history_list.clear()
+        for history_id, conv in reversed(self.conversation_history.items()):
+            # 显示时间戳和用户问题的前20个字符
+            preview = conv["user"][:20] + ("..." if len(conv["user"]) > 20 else "")
+            item_text = f"{conv['time']}: {preview}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, history_id)  # 存储ID
+            self.history_list.addItem(item)
+    
+    def load_history_conversation(self, history_id):
+        """加载历史对话 - 改进掐头去尾逻辑"""
+        if history_id in self.conversation_history:
+            conv = self.conversation_history[history_id]
+            
+            # 对AI回复进行掐头去尾处理
+            ai_response = conv["ai"]
+            lines = ai_response.strip().split('\n')
+            
+            # 改进的掐头去尾逻辑
+            if len(lines) >= 3:
+                # 查找第一个非空行的索引
+                first_content_line = 0
+                for i, line in enumerate(lines):
+                    if line.strip() and not line.strip().startswith(('```', '===', '---', '```python')):
+                        first_content_line = i
+                        break
+                
+                # 查找最后一个非空行的索引
+                last_content_line = len(lines) - 1
+                for i in range(len(lines)-1, -1, -1):
+                    if lines[i].strip() and not lines[i].strip().startswith(('```', '===', '---')):
+                        last_content_line = i
+                        break
+                
+                # 如果找到了有效内容，取中间部分
+                if first_content_line < last_content_line:
+                    cleaned_text = '\n'.join(lines[first_content_line:last_content_line+1])
+                else:
+                    cleaned_text = ai_response
+            else:
+                cleaned_text = ai_response
+            
+            self.comet_response.setText(cleaned_text)
+            self.comet_input.setText(conv["user"])
+            self.current_conversation_id = history_id
+    
+    def delete_history_item(self):
+        """删除选中的历史记录 - 添加确认对话框"""
+        current_item = self.history_list.currentItem()
+        if not current_item:
+            return
+            
+        history_id = current_item.data(Qt.UserRole)
+        if history_id not in self.conversation_history:
+            return
+        
+        # 显示确认对话框
+        reply = QMessageBox.question(self, "确认删除", 
+                                    "确定要删除这条对话记录吗？",
+                                    QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            del self.conversation_history[history_id]
+            self.save_conversation_history()
+            self.update_history_list()
+    
+    def clear_all_history(self):
+        """清空所有历史记录"""
+        reply = QMessageBox.question(self, "确认清空", 
+                                    "确定要清空所有对话历史吗？此操作不可撤销。",
+                                    QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.conversation_history.clear()
+            self.save_conversation_history()
+            self.update_history_list()
+    
+    def init_ui(self):
+        """初始化用户界面 - 将历史记录侧边栏移至右侧"""
+        self.setWindowTitle("PyComet")
+        self.setGeometry(100, 100, 1400, 933)  # 增加宽度以容纳侧边栏
+        
+        # 创建中央部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # 主布局
+        main_layout = QHBoxLayout(central_widget)  # 改为水平布局
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # ========== 左侧：主编辑和功能区域 ==========
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 创建水平布局用于编辑器和右侧面板
+        h_splitter = QSplitter(Qt.Horizontal)
+        
+        # 1. 编辑面板 (左侧)
+        self.editor_panel = CodeEditor(self)
+        h_splitter.addWidget(self.editor_panel)
+        
+        # 创建垂直分割器用于右侧的两个面板
+        v_splitter = QSplitter(Qt.Vertical)
+        
+        # 2. 控制台面板 (右下)
+        console_widget = QWidget()
+        console_layout = QVBoxLayout(console_widget)
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(0)
+        
+        console_title_bar = QWidget()
+        console_title_layout = QHBoxLayout(console_title_bar)
+        console_title_layout.setContentsMargins(5, 5, 5, 5)
+        
+        console_title = QLabel("🖥️  Console")
+        console_title.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #4fc3f7;
+            }
+        """)
+        console_title_layout.addWidget(console_title)
+        console_title_layout.addStretch()
+        
+        self.stop_button = QPushButton("⏹️")
+        self.stop_button.setToolTip("强制停止运行")
+        self.stop_button.setFixedSize(30, 30)
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_running)
+        console_title_layout.addWidget(self.stop_button)
+        
+        self.fix_button = QPushButton("🔧")
+        self.fix_button.setToolTip("修复错误")
+        self.fix_button.setFixedSize(30, 30)
+        self.fix_button.setEnabled(False)
+        self.fix_button.clicked.connect(self.send_fix_request)
+        console_title_layout.addWidget(self.fix_button)
+        
+        console_layout.addWidget(console_title_bar)
+        
+        self.console_panel = QTextBrowser()
+        self.console_panel.setReadOnly(True)
+        self.console_panel.setFont(QFont("Consolas", 10))
+        console_layout.addWidget(self.console_panel)
+        
+        v_splitter.addWidget(console_widget)
+        
+        # 3. 彗星面板 (右上)
+        comet_widget = QWidget()
+        comet_layout = QVBoxLayout(comet_widget)
+        
+        comet_title_bar = QWidget()
+        comet_title_layout = QHBoxLayout(comet_title_bar)
+        comet_title_layout.setContentsMargins(0, 0, 0, 0)
+        
+        comet_title = QLabel("☄️  Comet")
+        comet_title_layout.addWidget(comet_title)
+        comet_title_layout.addStretch()
+        
+        self.attach_code_checkbox = QCheckBox("附当前代码")
+        self.attach_code_checkbox.setChecked(False)
+        self.attach_code_checkbox.setToolTip("勾选后，将把当前编辑器的全部代码随请求发送给AI")
+        comet_title_layout.addWidget(self.attach_code_checkbox)
+        
+        comet_layout.addWidget(comet_title_bar)
+        
+        self.comet_response = QTextEdit()
+        self.comet_response.setReadOnly(True)
+        self.comet_response.setFont(QFont("Consolas", 10))
+        comet_layout.addWidget(self.comet_response, 3)
+        
+        input_layout = QHBoxLayout()
+        self.comet_input = QLineEdit()
+        self.comet_input.setPlaceholderText("输入您的要求...")
+        self.comet_input.returnPressed.connect(self.send_to_comet)
+        
+        self.send_button = QPushButton("发送")
+        self.send_button.clicked.connect(self.send_to_comet)
+        
+        self.adopt_button = QPushButton("采用")
+        self.adopt_button.clicked.connect(self.adopt_code)
+        self.adopt_button.setEnabled(False)
+        
+        input_layout.addWidget(self.comet_input, 4)
+        input_layout.addWidget(self.send_button, 1)
+        input_layout.addWidget(self.adopt_button, 1)
+        
+        comet_layout.addLayout(input_layout)
+        v_splitter.addWidget(comet_widget)
+        v_splitter.addWidget(console_widget)
+        
+        h_splitter.addWidget(v_splitter)
+        h_splitter.setSizes([700, 500])
+        v_splitter.setSizes([350, 250])  # 从[300, 200]改为[350, 250]
+        
+        left_layout.addWidget(h_splitter)
+        main_layout.addWidget(left_panel, 1)  # 左侧面板可伸缩
+        
+        # ========== 右侧：历史记录侧边栏 ==========
+        self.history_panel = QWidget()
+        self.history_panel.setMaximumWidth(300)
+        self.history_panel.setMinimumWidth(200)
+        history_layout = QVBoxLayout(self.history_panel)
+        history_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 历史面板标题栏
+        history_title_bar = QWidget()
+        history_title_layout = QHBoxLayout(history_title_bar)
+        history_title_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 折叠/展开按钮 - 放在标题栏左侧
+        self.toggle_history_btn = QPushButton("▶")
+        self.toggle_history_btn.setFixedSize(20, 20)
+        self.toggle_history_btn.setToolTip("折叠/展开侧边栏")
+        self.toggle_history_btn.clicked.connect(self.toggle_history_panel)
+        history_title_layout.addWidget(self.toggle_history_btn)
+        
+        history_title = QLabel("💬 对话历史")
+        history_title.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #4fc3f7;
+            }
+        """)
+        history_title_layout.addWidget(history_title)
+        history_title_layout.addStretch()
+        
+        history_layout.addWidget(history_title_bar)
+        
+        # 历史记录列表
+        self.history_list = QListWidget()
+        self.history_list.itemClicked.connect(self.on_history_item_clicked)
+        history_layout.addWidget(self.history_list, 1)
+        
+        # 历史记录操作按钮
+        history_buttons_layout = QHBoxLayout()
+        self.delete_history_btn = QPushButton("删除选中")
+        self.delete_history_btn.clicked.connect(self.delete_history_item)
+        self.clear_history_btn = QPushButton("清空全部")
+        self.clear_history_btn.clicked.connect(self.clear_all_history)
+        history_buttons_layout.addWidget(self.delete_history_btn)
+        history_buttons_layout.addWidget(self.clear_history_btn)
+        history_layout.addLayout(history_buttons_layout)
+        
+        # 添加到主布局
+        main_layout.addWidget(self.history_panel)
+        
+        # 最后应用主题
+        self.apply_full_theme()
+        
+        # 初始化历史列表
+        self.update_history_list()
+    
+    def toggle_history_panel(self):
+        """切换历史记录侧边栏的显示/隐藏 - 改进折叠逻辑"""
+        if self.history_panel.width() > 60:  # 当前展开状态
+            # 折叠侧边栏，保留最小宽度以便点击按钮
+            self.history_panel.setMaximumWidth(30)
+            self.history_panel.setMinimumWidth(30)
+            self.toggle_history_btn.setText("◀")  # 折叠时显示向右箭头
+            # 隐藏历史列表和按钮
+            self.history_list.hide()
+            self.delete_history_btn.hide()
+            self.clear_history_btn.hide()
+        else:  # 当前折叠状态
+            # 展开侧边栏
+            self.history_panel.setMaximumWidth(300)
+            self.history_panel.setMinimumWidth(200)
+            self.toggle_history_btn.setText("▶")  # 展开时显示向左箭头
+            # 显示历史列表和按钮
+            self.history_list.show()
+            self.delete_history_btn.show()
+            self.clear_history_btn.show()
+    
+    def on_history_item_clicked(self, item):
+        """历史记录项被点击时的处理"""
+        history_id = item.data(Qt.UserRole)
+        self.load_history_conversation(history_id)
+        
     def load_api_key(self):
         """从配置文件加载API密钥（支持加密和明文格式）"""
         config_file = "comet_config.json"
@@ -787,232 +1503,161 @@ class CometIDE(QMainWindow):
         """设置API密钥（菜单调用）"""
         self.show_api_key_dialog()
     
-    def init_ui(self):
-        """初始化用户界面"""
-        self.setWindowTitle("PyComet")
-        self.setGeometry(100, 100, 1200, 800)
+    def apply_full_theme(self):
+        """应用完整主题"""
+        # 应用窗口主题
+        self.apply_window_theme()
         
-        # 创建中央部件
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # 应用编辑器主题
+        if self.current_theme == "dark":
+            self.editor_panel.apply_dark_theme()
+            self.editor_panel.line_number_area.is_dark_theme = True
+        else:
+            self.editor_panel.apply_light_theme()
+            self.editor_panel.line_number_area.is_dark_theme = False
         
-        # 主布局
-        main_layout = QVBoxLayout(central_widget)
+        # 应用彗星面板标题
+        comet_title = self.findChild(QLabel)
+        if comet_title and comet_title.text() == "☄️  Comet":
+            if self.current_theme == "dark":
+                comet_title.setStyleSheet("""
+                    QLabel {
+                        font-size: 14px;
+                        font-weight: bold;
+                        color: #4fc3f7;
+                        padding: 5px;
+                        border-bottom: 1px solid #3c3c3c;
+                    }
+                """)
+            else:
+                comet_title.setStyleSheet("""
+                    QLabel {
+                        font-size: 14px;
+                        font-weight: bold;
+                        color: #1565C0;
+                        padding: 5px;
+                        border-bottom: 1px solid #cccccc;
+                    }
+                """)
         
-        # 创建水平布局用于三个主要面板
-        h_splitter = QSplitter(Qt.Horizontal)
+        # 应用控制台标题主题
+        self.apply_console_title_theme()
         
-        # 1. 编辑面板 (左侧)
-        self.editor_panel = CodeEditor(self)
-        h_splitter.addWidget(self.editor_panel)
+        # 应用其他部件主题
+        self.apply_console_theme()
+        self.apply_fix_button_theme()
+        self.apply_stop_button_theme()
+        self.apply_comet_response_theme()
+        self.apply_comet_input_theme()
+        self.apply_send_button_theme()
+        self.apply_adopt_button_theme()
+        self.apply_history_panel_theme()
         
-        # 创建垂直分割器用于右侧的两个面板
-        v_splitter = QSplitter(Qt.Vertical)
-        
-        # 2. 控制台面板 (右下) - 添加标题和修复按钮
-        console_widget = QWidget()
-        console_layout = QVBoxLayout(console_widget)
-        console_layout.setContentsMargins(0, 0, 0, 0)
-        console_layout.setSpacing(0)
-        
-        # 控制台标题栏 - 包含标题和修复按钮
-        console_title_bar = QWidget()
-        console_title_layout = QHBoxLayout(console_title_bar)
-        console_title_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # 控制台标题
-        console_title = QLabel("🖥️  Console")
-        console_title.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                color: #4fc3f7;
-            }
-        """)
-        console_title_layout.addWidget(console_title)
-        
-        # 添加弹簧，使按钮在右侧
-        console_title_layout.addStretch()
-        
-        # === 新增：强制停止按钮 ===
-        self.stop_button = QPushButton("⏹️")
-        self.stop_button.setToolTip("强制停止运行")
-        self.stop_button.setFixedSize(30, 30)
-        self.stop_button.setEnabled(False)  # 默认禁用
-        self.stop_button.clicked.connect(self.stop_running)
-        console_title_layout.addWidget(self.stop_button)
-        
-        # 修复按钮
-        self.fix_button = QPushButton("🔧")
-        self.fix_button.setToolTip("修复错误")
-        self.fix_button.setFixedSize(30, 30)
-        self.fix_button.setEnabled(False)  # 默认禁用
-        self.fix_button.clicked.connect(self.send_fix_request)
-        console_title_layout.addWidget(self.fix_button)
-        
-        console_layout.addWidget(console_title_bar)
-        
-        # 控制台内容
-        self.console_panel = QTextBrowser()
-        self.console_panel.setReadOnly(True)
-        self.console_panel.setFont(QFont("Consolas", 10))
-        console_layout.addWidget(self.console_panel)
-        
-        v_splitter.addWidget(console_widget)
-        
-        # 3. 彗星面板 (右上)
-        comet_widget = QWidget()
-        comet_layout = QVBoxLayout(comet_widget)
-        
-        # 彗星面板标题栏（水平布局，包含标题和复选框）
-        comet_title_bar = QWidget()
-        comet_title_layout = QHBoxLayout(comet_title_bar)
-        comet_title_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 彗星面板标题
-        comet_title = QLabel("☄️  Comet")
-        comet_title_layout.addWidget(comet_title)
-        
-        # 添加弹簧，使复选框靠右
-        comet_title_layout.addStretch()
-        
-        # === 新增：创建"附当前代码"复选框 ===
-        self.attach_code_checkbox = QCheckBox("附当前代码")
-        self.attach_code_checkbox.setChecked(False)  # 默认不选中
-        self.attach_code_checkbox.setToolTip("勾选后，将把当前编辑器的全部代码随请求发送给AI")
-        comet_title_layout.addWidget(self.attach_code_checkbox)
-        
-        comet_layout.addWidget(comet_title_bar)
-        
-        # AI回复显示区域
-        self.comet_response = QTextEdit()
-        self.comet_response.setReadOnly(True)
-        self.comet_response.setFont(QFont("Consolas", 10))
-        comet_layout.addWidget(self.comet_response, 3)
-        
-        # 输入区域
-        input_layout = QHBoxLayout()
-        
-        self.comet_input = QLineEdit()
-        self.comet_input.setPlaceholderText("输入您的要求...")
-        self.comet_input.returnPressed.connect(self.send_to_comet)
-        
-        self.send_button = QPushButton("发送")
-        self.send_button.clicked.connect(self.send_to_comet)
-        
-        self.adopt_button = QPushButton("采用")
-        self.adopt_button.clicked.connect(self.adopt_code)
-        self.adopt_button.setEnabled(False)
-        
-        input_layout.addWidget(self.comet_input, 4)
-        input_layout.addWidget(self.send_button, 1)
-        input_layout.addWidget(self.adopt_button, 1)
-        
-        comet_layout.addLayout(input_layout)
-        
-        v_splitter.addWidget(comet_widget)
-        v_splitter.addWidget(console_widget)
-        
-        h_splitter.addWidget(v_splitter)
-        
-        # 设置分割器初始比例
-        h_splitter.setSizes([700, 500])
-        v_splitter.setSizes([300, 200])
-        
-        main_layout.addWidget(h_splitter)
-        
-        # 最后应用主题，确保所有组件都已创建
-        self.apply_full_theme()
+        # 重绘行号区域
+        self.editor_panel.line_number_area.update()
     
-    def create_shared_actions(self):
-        """创建所有共享的Action，避免快捷键冲突"""
-        # 文件菜单相关的共享action
-        self.new_action = QAction("新建", self)
-        self.new_action.setShortcut("Ctrl+N")
-        self.new_action.triggered.connect(self.new_file)
+    def apply_history_panel_theme(self):
+        """应用历史面板主题 - 改进折叠状态的样式"""
+        if self.current_theme == "dark":
+            self.history_panel.setStyleSheet("""
+                QWidget {
+                    background-color: #252526;
+                    border-left: 1px solid #3c3c3c;
+                }
+                QListWidget {
+                    background-color: #1e1e1e;
+                    color: #d4d4d4;
+                    border: 1px solid #3c3c3c;
+                    border-bottom: 1px solid #3c3c3c;
+                }
+                QListWidget::item:selected {
+                    background-color: #264f78;
+                }
+                QPushButton {
+                    background-color: #0d47a1;
+                    color: white;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #1565c0;
+                }
+            """)
+        else:
+            self.history_panel.setStyleSheet("""
+                QWidget {
+                    background-color: #f5f5f5;
+                    border-left: 1px solid #cccccc;
+                }
+                QListWidget {
+                    background-color: #ffffff;
+                    color: #333333;
+                    border: 1px solid #cccccc;
+                    border-bottom: 1px solid #cccccc;
+                }
+                QListWidget::item:selected {
+                    background-color: #a8d1ff;
+                }
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #1976D2;
+                }
+            """)
         
-        self.open_action = QAction("打开", self)
-        self.open_action.setShortcut("Ctrl+O")
-        self.open_action.triggered.connect(self.open_file)
-        
-        self.save_action = QAction("保存", self)
-        self.save_action.setShortcut("Ctrl+S")
-        self.save_action.triggered.connect(self.save_code)
-        
-        self.save_as_action = QAction("另存为", self)
-        self.save_as_action.setShortcut("Ctrl+Shift+S")
-        self.save_as_action.triggered.connect(self.save_as_file)
-        
-        # 新增：打包应用action
-        self.package_action = QAction("打包应用", self)
-        self.package_action.triggered.connect(self.package_app)
-        
-        self.exit_action = QAction("退出", self)
-        self.exit_action.setShortcut("Ctrl+Q")
-        self.exit_action.triggered.connect(self.close)
-        
-        # 编辑菜单相关的共享action
-        self.undo_action = QAction("撤销", self)
-        self.undo_action.setShortcut("Ctrl+Z")
-        self.undo_action.triggered.connect(self.editor_panel.undo)
-        
-        self.redo_action = QAction("重做", self)
-        self.redo_action.setShortcut("Ctrl+Y")
-        self.redo_action.triggered.connect(self.editor_panel.redo)
-        
-        self.comment_action = QAction("注释/取消注释", self)
-        self.comment_action.setShortcut("Ctrl+/")
-        self.comment_action.triggered.connect(self.toggle_comment)
-        
-        self.duplicate_action = QAction("复制行", self)
-        self.duplicate_action.setShortcut("Ctrl+D")
-        self.duplicate_action.triggered.connect(self.duplicate_line)
-        
-        # 运行相关的共享action
-        self.run_action = QAction("运行代码", self)
-        self.run_action.setShortcut("Ctrl+Return")
-        self.run_action.triggered.connect(self.run_code)
-        
-        # 主题相关的共享action - 去掉选项框
-        self.dark_theme_action = QAction("深色主题", self)
-        self.dark_theme_action.triggered.connect(lambda: self.switch_to_dark_theme())
-        
-        self.light_theme_action = QAction("浅色主题", self)
-        self.light_theme_action.triggered.connect(lambda: self.switch_to_light_theme())
-        
-        # 设置相关的共享action
-        self.set_api_key_action = QAction("设置API密钥", self)
-        self.set_api_key_action.triggered.connect(self.set_api_key)
-        
-        # 帮助相关的共享action
-        self.about_action = QAction("关于PyComet", self)
-        self.about_action.triggered.connect(self.show_about)
-        
-        self.help_action = QAction("使用帮助", self)
-        self.help_action.triggered.connect(self.show_help)
+        # 折叠按钮的特殊样式
+        if self.current_theme == "dark":
+            self.toggle_history_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #424242;
+                    color: white;
+                    border: 1px solid #5a5a5a;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #5a5a5a;
+                }
+            """)
+        else:
+            self.toggle_history_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #333333;
+                    border: 1px solid #bdbdbd;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+            """)
     
     def apply_console_theme(self):
-        """应用控制台主题"""
+        """应用控制台主题 - 添加上下边框"""
         if self.current_theme == "dark":
             self.console_panel.setStyleSheet("""
-                QTextEdit {
+                QTextBrowser {
                     background-color: #0c0c0c;
                     color: #cccccc;
                     border: 1px solid #3c3c3c;
+                    border-top: 1px solid #3c3c3c;
+                    border-bottom: 1px solid #3c3c3c;
                 }
             """)
         else:
             self.console_panel.setStyleSheet("""
-                QTextEdit {
+                QTextBrowser {
                     background-color: #f5f5f5;
                     color: #333333;
                     border: 1px solid #cccccc;
+                    border-top: 1px solid #cccccc;
+                    border-bottom: 1px solid #cccccc;
                 }
             """)
     
     def apply_console_title_theme(self):
         """应用控制台标题主题"""
-        # 查找标题标签
         console_title = None
         for child in self.findChildren(QLabel):
             if child.text() == "🖥️  Console":
@@ -1123,6 +1768,7 @@ class CometIDE(QMainWindow):
                     background-color: #252526;
                     color: #d4d4d4;
                     border: 1px solid #3c3c3c;
+                    border-top: 1px solid #3c3c3c;
                     min-height: 200px;
                 }
             """)
@@ -1132,6 +1778,7 @@ class CometIDE(QMainWindow):
                     background-color: #ffffff;
                     color: #333333;
                     border: 1px solid #cccccc;
+                    border-top: 1px solid #cccccc;
                     min-height: 200px;
                 }
             """)
@@ -1165,11 +1812,17 @@ class CometIDE(QMainWindow):
                     background-color: #0d47a1;
                     color: white;
                     padding: 8px 16px;
-                    border: none;
+                    border: 1px solid #0d47a1;
                     font-weight: bold;
                 }
                 QPushButton:hover {
                     background-color: #1565c0;
+                    border: 1px solid #1565c0;
+                }
+                QPushButton:disabled {
+                    background-color: #424242;
+                    color: #757575;
+                    border: 1px solid #424242;
                 }
             """)
         else:
@@ -1178,11 +1831,17 @@ class CometIDE(QMainWindow):
                     background-color: #2196F3;
                     color: white;
                     padding: 8px 16px;
-                    border: none;
+                    border: 1px solid #2196F3;
                     font-weight: bold;
                 }
                 QPushButton:hover {
                     background-color: #1976D2;
+                    border: 1px solid #1976D2;
+                }
+                QPushButton:disabled {
+                    background-color: #e0e0e0;
+                    color: #9e9e9e;
+                    border: 1px solid #e0e0e0;
                 }
             """)
     
@@ -1194,11 +1853,17 @@ class CometIDE(QMainWindow):
                     background-color: #1b5e20;
                     color: white;
                     padding: 8px 16px;
-                    border: none;
+                    border: 1px solid #1b5e20;
                     font-weight: bold;
                 }
                 QPushButton:hover {
                     background-color: #2e7d32;
+                    border: 1px solid #2e7d32;
+                }
+                QPushButton:disabled {
+                    background-color: #424242;
+                    color: #757575;
+                    border: 1px solid #424242;
                 }
             """)
         else:
@@ -1207,11 +1872,17 @@ class CometIDE(QMainWindow):
                     background-color: #4CAF50;
                     color: white;
                     padding: 8px 16px;
-                    border: none;
+                    border: 1px solid #4CAF50;
                     font-weight: bold;
                 }
                 QPushButton:hover {
                     background-color: #45a049;
+                    border: 1px solid #45a049;
+                }
+                QPushButton:disabled {
+                    background-color: #e0e0e0;
+                    color: #9e9e9e;
+                    border: 1px solid #e0e0e0;
                 }
             """)
     
@@ -1240,65 +1911,74 @@ class CometIDE(QMainWindow):
             palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
             palette.setColor(QPalette.ToolTipBase, Qt.white)
             palette.setColor(QPalette.ToolTipText, Qt.black)
-            palette.setColor(QPalette.Text, Qt.black)
-            palette.setColor(QPalette.Button, QColor(240, 240, 240))
-            palette.setColor(QPalette.ButtonText, Qt.black)
-            palette.setColor(QPalette.BrightText, Qt.red)
-            palette.setColor(QPalette.Highlight, QColor(33, 150, 243))
-            palette.setColor(QPalette.HighlightedText, Qt.white)
             self.setPalette(palette)
-    
-    def apply_full_theme(self):
-        """应用完整主题"""
-        # 应用窗口主题
-        self.apply_window_theme()
+            
+    def create_shared_actions(self):
+        """创建所有共享的Action，避免快捷键冲突"""
+        # 文件菜单相关的共享action
+        self.new_action = QAction("新建", self)
+        self.new_action.setShortcut("Ctrl+N")
+        self.new_action.triggered.connect(self.new_file)
         
-        # 应用编辑器主题
-        if self.current_theme == "dark":
-            self.editor_panel.apply_dark_theme()
-            self.editor_panel.line_number_area.is_dark_theme = True
-        else:
-            self.editor_panel.apply_light_theme()
-            self.editor_panel.line_number_area.is_dark_theme = False
+        self.open_action = QAction("打开", self)
+        self.open_action.setShortcut("Ctrl+O")
+        self.open_action.triggered.connect(self.open_file)
         
-        # 应用彗星面板标题
-        comet_title = self.findChild(QLabel)
-        if comet_title and comet_title.text() == "☄️  Comet":
-            if self.current_theme == "dark":
-                comet_title.setStyleSheet("""
-                    QLabel {
-                        font-size: 14px;
-                        font-weight: bold;
-                        color: #4fc3f7;
-                        padding: 5px;
-                        border-bottom: 1px solid #3c3c3c;
-                    }
-                """)
-            else:
-                comet_title.setStyleSheet("""
-                    QLabel {
-                        font-size: 14px;
-                        font-weight: bold;
-                        color: #1565C0;
-                        padding: 5px;
-                        border-bottom: 1px solid #cccccc;
-                    }
-                """)
+        self.save_action = QAction("保存", self)
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.triggered.connect(self.save_code)
         
-        # 应用控制台标题主题
-        self.apply_console_title_theme()
+        self.save_as_action = QAction("另存为", self)
+        self.save_as_action.setShortcut("Ctrl+Shift+S")
+        self.save_as_action.triggered.connect(self.save_as_file)
         
-        # 应用其他部件主题
-        self.apply_console_theme()
-        self.apply_fix_button_theme()
-        self.apply_stop_button_theme()  # 新增
-        self.apply_comet_response_theme()
-        self.apply_comet_input_theme()
-        self.apply_send_button_theme()
-        self.apply_adopt_button_theme()
+        # 新增：打包应用action
+        self.package_action = QAction("打包应用", self)
+        self.package_action.triggered.connect(self.package_app)
         
-        # 重绘行号区域
-        self.editor_panel.line_number_area.update()
+        self.exit_action = QAction("退出", self)
+        self.exit_action.setShortcut("Ctrl+Q")
+        self.exit_action.triggered.connect(self.close)
+        
+        # 编辑菜单相关的共享action
+        self.undo_action = QAction("撤销", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        self.undo_action.triggered.connect(self.editor_panel.undo)
+        
+        self.redo_action = QAction("重做", self)
+        self.redo_action.setShortcut("Ctrl+Y")
+        self.redo_action.triggered.connect(self.editor_panel.redo)
+        
+        self.comment_action = QAction("注释/取消注释", self)
+        self.comment_action.setShortcut("Ctrl+/")
+        self.comment_action.triggered.connect(self.toggle_comment)
+        
+        self.duplicate_action = QAction("复制行", self)
+        self.duplicate_action.setShortcut("Ctrl+D")
+        self.duplicate_action.triggered.connect(self.duplicate_line)
+        
+        # 运行相关的共享action
+        self.run_action = QAction("运行代码", self)
+        self.run_action.setShortcut("Ctrl+Return")
+        self.run_action.triggered.connect(self.run_code)
+        
+        # 主题相关的共享action - 去掉选项框
+        self.dark_theme_action = QAction("深色主题", self)
+        self.dark_theme_action.triggered.connect(lambda: self.switch_to_dark_theme())
+        
+        self.light_theme_action = QAction("浅色主题", self)
+        self.light_theme_action.triggered.connect(lambda: self.switch_to_light_theme())
+        
+        # 设置相关的共享action
+        self.set_api_key_action = QAction("设置API密钥", self)
+        self.set_api_key_action.triggered.connect(self.set_api_key)
+        
+        # 帮助相关的共享action
+        self.about_action = QAction("关于PyComet", self)
+        self.about_action.triggered.connect(self.show_about)
+        
+        self.help_action = QAction("使用帮助", self)
+        self.help_action.triggered.connect(self.show_help)
     
     def create_menu(self):
         """创建菜单栏"""
@@ -1340,7 +2020,7 @@ class CometIDE(QMainWindow):
         help_menu = menubar.addMenu("帮助")
         help_menu.addAction(self.about_action)
         help_menu.addAction(self.help_action)
-    
+        
     def switch_to_dark_theme(self):
         """切换到深色主题"""
         if self.current_theme != "dark":
@@ -1371,16 +2051,6 @@ class CometIDE(QMainWindow):
                 f.write(content)
         except Exception as e:
             self.console_update_signal.emit(f"自动保存失败: {e}", "normal")
-    
-    def load_autosave(self):
-        """加载自动保存的文件"""
-        try:
-            if os.path.exists(".comet_ide_autosave.py"):
-                with open(".comet_ide_autosave.py", "r", encoding="utf-8") as f:
-                    content = f.read()
-                    self.editor_panel.setPlainText(content)
-        except Exception as e:
-            self.console_update_signal.emit(f"加载自动保存文件失败: {e}", "normal")
     
     def decode_output(self, data):
         """解码子进程输出，处理可能的编码问题"""
@@ -1480,18 +2150,30 @@ class CometIDE(QMainWindow):
             QMetaObject.invokeMethod(self.fix_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
     
     def execute_non_interactive(self, code):
-        """执行非交互式代码"""
+        """执行非交互式代码 - 修复打包后的问题"""
         # 创建临时文件
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
             f.write(code)
             temp_file = f.name
         
+        # 判断是否处于打包环境
+        is_frozen = getattr(sys, 'frozen', False)
+        
         # 在新线程中执行代码
         def execute():
             try:
-                # 使用subprocess.Popen而不是run，以便能够停止进程
+                # 选择正确的Python解释器
+                if is_frozen:
+                    # 在打包环境中，尝试使用系统Python
+                    # 注意：这假设系统已安装Python且在PATH中
+                    python_cmd = 'python'
+                else:
+                    # 在开发环境中，使用当前解释器
+                    python_cmd = sys.executable
+                                
+                # 使用subprocess.Popen执行
                 self.non_interactive_process = subprocess.Popen(
-                    [sys.executable, temp_file],
+                    [python_cmd, temp_file],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -1542,6 +2224,14 @@ class CometIDE(QMainWindow):
                 if self.has_error:
                     QMetaObject.invokeMethod(self.fix_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
                 
+            except FileNotFoundError as e:
+                if is_frozen and 'python' in str(e):
+                    self.console_update_signal.emit("错误: 在打包环境中未找到系统Python解释器。", "failure")
+                    self.console_update_signal.emit("请确保Python已安装并添加到系统PATH中。", "failure")
+                else:
+                    self.console_update_signal.emit(f"执行错误: {e}", "failure")
+                self.has_error = True
+                QMetaObject.invokeMethod(self.fix_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
             except Exception as e:
                 self.console_update_signal.emit(f"执行错误: {e}", "failure")
                 self.has_error = True
@@ -1620,7 +2310,7 @@ class CometIDE(QMainWindow):
         self.console_panel.verticalScrollBar().setValue(
             self.console_panel.verticalScrollBar().maximum()
         )
-    
+        
     def send_fix_request(self):
         """发送错误修复请求到AI助手"""
         if not hasattr(self, 'current_running_code') or not self.current_running_code.strip():
@@ -1709,7 +2399,7 @@ class CometIDE(QMainWindow):
         thread.start()
     
     def send_to_comet(self):
-        """发送请求到AI助手"""
+        """发送请求到AI助手 - 添加自动清空输入框"""
         user_input = self.comet_input.text().strip()
         if not user_input:
             QMessageBox.warning(self, "输入为空", "请输入您的要求")
@@ -1729,14 +2419,13 @@ class CometIDE(QMainWindow):
         # 重置修复模式标志
         self.is_fix_mode = False
         
-        # === 修改提示词构建逻辑，根据复选框状态决定是否附加当前代码 ===
+        # 构建提示词
         base_prompt = f"""请严格遵守以下规则：要求是{user_input}。请根据要求只输出极简风格的python代码，并搭配逐行注释。"""
         
-        # 如果用户勾选了"附当前代码"，则将当前代码附加到提示中
         final_prompt = base_prompt
         if hasattr(self, 'attach_code_checkbox') and self.attach_code_checkbox.isChecked():
             current_code = self.editor_panel.toPlainText()
-            if current_code.strip():  # 如果当前有代码
+            if current_code.strip():
                 final_prompt = f"""{base_prompt}
 
 当前编辑器中的代码如下，可供参考：
@@ -1744,6 +2433,10 @@ class CometIDE(QMainWindow):
 {current_code}
 
 """
+        
+        # 保存用户输入（用于后续添加到历史）
+        self.last_user_input = user_input
+        
         # API配置
         API_KEY = self.api_key
         URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
@@ -1757,7 +2450,7 @@ class CometIDE(QMainWindow):
         data = {
             "model": "glm-4-flash",
             "messages": [
-                {"role": "user", "content": final_prompt}  # 使用最终提示词
+                {"role": "user", "content": final_prompt}
             ],
             "stream": False
         }
@@ -1770,6 +2463,8 @@ class CometIDE(QMainWindow):
                 if response.status_code == 200:
                     result = response.json()
                     ai_response = result["choices"][0]["message"]["content"]
+                    # 添加到历史记录
+                    self.add_to_history(self.last_user_input, ai_response)
                     # 发送信号更新UI
                     self.comet_response_signal.emit(ai_response)
                 else:
@@ -1805,9 +2500,11 @@ class CometIDE(QMainWindow):
         self.comet_response.setText(error_text)
     
     def enable_send_button(self):
-        """启用发送按钮（线程安全）"""
+        """启用发送按钮（线程安全）- 添加清空输入框"""
         self.send_button.setEnabled(True)
         self.send_button.setText("发送")
+        # 新增：自动清空输入框
+        self.comet_input.clear()
     
     def adopt_code(self):
         """采用AI生成的代码 - 修复模式支持撤销/重做"""
@@ -1849,7 +2546,7 @@ class CometIDE(QMainWindow):
             cursor.movePosition(QTextCursor.StartOfLine)
             line_start_position = cursor.position()
             cursor.insertText(ai_code)
-    
+            
     def toggle_comment(self):
         """注释/取消注释当前行或选中行"""
         cursor = self.editor_panel.textCursor()
@@ -1970,7 +2667,7 @@ class CometIDE(QMainWindow):
                 QMessageBox.critical(self, "保存失败", f"保存文件时出错: {e}")
     
     def open_file(self):
-        """打开文件"""
+        """打开文件 - 增加初始化自动补全词汇"""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "打开文件", "", "Python文件 (*.py);;所有文件 (*)"
         )
@@ -1980,6 +2677,9 @@ class CometIDE(QMainWindow):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     self.editor_panel.setPlainText(content)
+                    # 初始化自动补全词汇
+                    self.editor_panel.completer.clear_dynamic()
+                    self.editor_panel.completer.update_from_text(content)
                 self.console_update_signal.emit(f"已打开文件: {file_path}", "normal")
             except Exception as e:
                 QMessageBox.critical(self, "打开失败", f"打开文件时出错: {e}")
@@ -1987,6 +2687,8 @@ class CometIDE(QMainWindow):
     def new_file(self):
         """新建文件"""
         self.editor_panel.clear()
+        # 清空动态关键词集合
+        self.editor_panel.completer.clear_dynamic()
     
     def package_app(self):
         """打包应用程序"""
@@ -2327,6 +3029,8 @@ class CometIDE(QMainWindow):
             <li>强制停止运行功能</li>
             <li>常用编辑快捷键</li>
             <li>应用打包功能</li>
+            <li>对话历史管理（可折叠侧边栏）</li>
+            <li>关键词自动补全（支持模糊查询）</li>
         </ul>
         <p>© 2026 PyComet</p>
         """
@@ -2334,7 +3038,7 @@ class CometIDE(QMainWindow):
         QMessageBox.about(self, "关于PyComet", about_text)
     
     def show_help(self):
-        """显示帮助对话框 - 改为可滚动定长宽"""
+        """显示帮助对话框 - 更新包含所有新功能"""
         help_text = """
         <h2>PyComet 使用帮助</h2>
         
@@ -2342,6 +3046,8 @@ class CometIDE(QMainWindow):
         <ul>
             <li><b>运行代码:</b> 点击菜单栏的运行->运行代码或按Ctrl+Enter</li>
             <li><b>打开文件:</b> 点击菜单栏的文件->打开或按Ctrl+O</li>
+            <li><b>保存文件:</b> 点击菜单栏的文件->保存或按Ctrl+S</li>
+            <li><b>另存为文件:</b> 点击菜单栏的文件->另存为或按Ctrl+Shift+S</li>
             <li><b>打包应用:</b> 点击菜单栏的文件->打包应用</li>
         </ul>
         
@@ -2353,6 +3059,8 @@ class CometIDE(QMainWindow):
             <li><b>重做:</b> Ctrl+Y 或 Ctrl+Shift+Z</li>
             <li><b>增加缩进:</b> Tab</li>
             <li><b>减少缩进:</b> Ctrl+Tab</li>
+            <li><b>放大字体:</b> Ctrl++ 或 Ctrl+滚轮向上</li>
+            <li><b>缩小字体:</b> Ctrl+- 或 Ctrl+滚轮向下</li>
         </ul>
         
         <h3>AI助手(Comet):</h3>
@@ -2361,6 +3069,36 @@ class CometIDE(QMainWindow):
             <li>点击"发送"按钮或按Enter键提交</li>
             <li>AI生成的代码会显示在响应区域</li>
             <li>点击"采用"按钮将代码插入到编辑器中</li>
+            <li>勾选"附当前代码"可将编辑器代码随请求发送</li>
+        </ul>
+        
+        <h3>对话历史功能:</h3>
+        <ul>
+            <li>点击历史记录可重新加载该次对话</li>
+            <li>支持删除单条记录或清空全部历史</li>
+            <li>点击"◀"按钮可折叠侧边栏，点击"▶"按钮展开</li>
+            <li>历史记录自动保存，最多保存50条</li>
+        </ul>
+        
+        <h3>关键词自动补全:</h3>
+        <ul>
+            <li><b>功能:</b> 代码编辑器支持关键词自动补全</li>
+            <li><b>触发:</b> 输入2个字符后触发补全提示</li>
+            <li><b>匹配规则:</b> 支持前缀匹配和子序列模糊匹配</li>
+            <li><b>交互操作:</b></li>
+            <ul>
+                <li>使用↑↓键选择候选词</li>
+                <li>回车键确认选择</li>
+                <li>Esc键取消补全列表</li>
+                <li>输入分隔符自动隐藏列表</li>
+            </ul>
+            <li><b>关键词来源:</b></li>
+            <ul>
+                <li>内置Python关键字和常用函数</li>
+                <li>从当前文档自动提取完整标识符</li>
+                <li>只收录长度≥3的有效Python标识符</li>
+            </ul>
+            <li><b>主题支持:</b> 补全菜单支持深色/浅色主题切换</li>
         </ul>
         
         <h3>错误修复功能:</h3>
@@ -2391,18 +3129,6 @@ class CometIDE(QMainWindow):
             <li>生成单文件可执行程序，方便分发</li>
         </ul>
         
-        <h3>文件保存:</h3>
-        <ul>
-            <li><b>自动保存:</b> 每30秒自动保存到.comet_ide_autosave.py文件</li>
-            <li><b>手动保存 (Ctrl+S):</b> 保存到.comet_ide_autosave.py文件</li>
-            <li><b>另存为 (Ctrl+Shift+S):</b> 选择其他位置和文件名保存</li>
-        </ul>
-        
-        <h3>主题切换:</h3>
-        <ul>
-            <li>在"主题"菜单中选择深色或浅色主题</li>
-        </ul>
-        
         <h3>API密钥设置:</h3>
         <ul>
             <li>首次运行或API密钥无效时，会弹出设置对话框</li>
@@ -2410,14 +3136,40 @@ class CometIDE(QMainWindow):
             <li>密钥保存在comet_config.json配置文件中</li>
         </ul>
         
-        <h3>自动恢复:</h3>
-        <p>程序启动时会自动加载.comet_ide_autosave.py文件中的内容，以便恢复上次的编辑</p>
+        <h3>自动保存与恢复:</h3>
+        <ul>
+            <li><b>自动保存:</b> 每30秒自动保存到.comet_ide_autosave.py文件</li>
+            <li><b>程序启动:</b> 自动加载.comet_ide_autosave.py文件中的内容</li>
+            <li><b>意外关闭:</b> 不清理自动保存文件，以便恢复上次的编辑</li>
+        </ul>
+        
+        <h3>代码编辑器功能:</h3>
+        <ul>
+            <li>Python语法高亮（关键字、字符串、注释、函数等）</li>
+            <li>行号显示</li>
+            <li>自动缩进（在行末输入冒号后回车自动缩进）</li>
+            <li>字体缩放功能（Ctrl++放大，Ctrl+-缩小，Ctrl+滚轮缩放）</li>
+            <li>智能关键词自动补全（如上述）</li>
+        </ul>
+        
+        <h3>控制台功能:</h3>
+        <ul>
+            <li>实时显示代码执行输出</li>
+            <li>彩色显示成功/失败信息</li>
+            <li>自动滚动到底部</li>
+            <li>支持复制控制台内容</li>
+        </ul>
+        
+        <h3>版本信息:</h3>
+        <p>PyComet 版本: 1.4.0</p>
+        <p>最后更新日期: 2026年</p>
+        <p>一个轻量级、功能丰富的Python集成开发环境</p>
         """
         
         # 创建自定义对话框
         dialog = QDialog(self)
         dialog.setWindowTitle("使用帮助")
-        dialog.setFixedSize(600, 500)  # 定长宽
+        dialog.setFixedSize(650, 550)  # 稍微增加尺寸以容纳更多内容
         
         # 创建布局
         layout = QVBoxLayout(dialog)
@@ -2437,7 +3189,7 @@ class CometIDE(QMainWindow):
         
         # 显示对话框
         dialog.exec_()
-    
+   
     def closeEvent(self, event):
         """关闭事件，不清理自动保存文件，以便恢复"""
         # 如果交互式进程仍在运行，则终止它
@@ -2459,6 +3211,19 @@ class CometIDE(QMainWindow):
         # 不再删除自动保存文件，以便在意外断电等情况下恢复代码
         event.accept()
 
+    def load_autosave(self):
+        """加载自动保存的文件 - 增加初始化自动补全词汇"""
+        try:
+            if os.path.exists(".comet_ide_autosave.py"):
+                with open(".comet_ide_autosave.py", "r", encoding="utf-8") as f:
+                    content = f.read()
+                    self.editor_panel.setPlainText(content)
+                    # 初始化自动补全词汇
+                    self.editor_panel.completer.clear_dynamic()
+                    self.editor_panel.completer.update_from_text(content)
+        except Exception as e:
+            self.console_update_signal.emit(f"加载自动保存文件失败: {e}", "normal")
+ 
 
 def main():
     app = QApplication(sys.argv)
