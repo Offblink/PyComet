@@ -306,7 +306,6 @@ class ApiKeyDialog(QDialog):
         thread.daemon = True
         thread.start()
 
-
 class PackageDialog(QDialog):
     """打包配置对话框"""
     def __init__(self, parent=None):
@@ -418,6 +417,25 @@ class CodeEditor(QPlainTextEdit):
         
         # 文本变化时更新动态关键词
         self.textChanged.connect(self.on_text_changed)
+        
+    def mousePressEvent(self, event):
+        """
+        处理鼠标点击事件，点击非补全列表区域时隐藏补全列表。
+        """
+        # 首先调用父类方法，确保正常的点击行为（如移动光标）得以执行
+        super().mousePressEvent(event)
+        
+        # 如果补全列表当前是显示的
+        if self.completion_list.isVisible():
+            # 获取鼠标点击的全局坐标
+            click_global_pos = self.mapToGlobal(event.pos())
+            # 获取补全列表的全局几何区域
+            list_geometry = self.completion_list.geometry()
+            
+            # 如果点击位置不在补全列表的矩形区域内
+            if not list_geometry.contains(click_global_pos):
+                # 则隐藏补全列表
+                self.hide_completion_list()
         
     def on_text_changed(self):
         """文本变化时，更新自动补全器的动态关键词集合"""
@@ -617,7 +635,42 @@ class CodeEditor(QPlainTextEdit):
                 self.zoom_out()
                 event.accept()
                 return
-        
+                
+        # 处理自动补全引号和括号
+        char = event.text()
+        if char and not self.completion_list.isVisible():
+            # 定义需要自动补全的字符对
+            auto_pairs = {
+                '\'': '\'',  # 单引号
+                '\"': '\"',  # 双引号
+                '(': ')',    # 圆括号
+                '[': ']',    # 方括号
+                '{': '}',    # 花括号
+                '<': '>',    # 尖括号
+            }
+            
+            if char in auto_pairs:
+                cursor = self.textCursor()
+                
+                # 检查是否有选中文本
+                if cursor.hasSelection():
+                    # 用对应的字符对包围选中的文本
+                    selected_text = cursor.selectedText()
+                    cursor.insertText(char + selected_text + auto_pairs[char])
+                    # 移动光标到选中文本的末尾
+                    cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, len(auto_pairs[char]))
+                    self.setTextCursor(cursor)
+                    event.accept()
+                    return
+                else:
+                    # 没有选中文本，直接插入字符对并将光标移动到中间
+                    cursor.insertText(char + auto_pairs[char])
+                    # 将光标向左移动一位，使其在两个字符中间
+                    cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, 1)
+                    self.setTextCursor(cursor)
+                    event.accept()
+                    return
+                
         # 如果补全列表显示，处理导航键
         if self.completion_list.isVisible():
             if event.key() == Qt.Key_Up:
@@ -929,7 +982,6 @@ class LineNumberArea(QWidget):
     def paintEvent(self, event):
         self.code_editor.line_number_area_paint_event(event, self.is_dark_theme)
 
-
 class PythonHighlighter(QSyntaxHighlighter):
     """Python语法高亮器"""
     def __init__(self, parent=None):
@@ -1024,6 +1076,11 @@ class CometIDE(QMainWindow):
         self.conversation_history = self.load_conversation_history()
         self.current_conversation_id = None
         
+        # 添加对话历史浏览相关属性
+        self.history_browse_index = -1  # 当前浏览的历史索引
+        self.history_keys = []  # 存储对话历史键的列表，按时间排序
+        self.current_input = ""  # 保存当前输入框内容
+        
         # 先创建UI部件
         self.init_ui()
         
@@ -1043,7 +1100,7 @@ class CometIDE(QMainWindow):
         self.comet_error_signal.connect(self.update_comet_error)
         self.request_finished_signal.connect(self.enable_send_button)
         self.process_finished_signal.connect(self.on_process_finished)
-    
+      
     def load_conversation_history(self):
         """从文件加载对话历史"""
         history_file = "comet_history.json"
@@ -1096,6 +1153,8 @@ class CometIDE(QMainWindow):
     def update_history_list(self):
         """更新历史记录列表显示"""
         self.history_list.clear()
+        self.history_keys = []  # 清空并重新填充历史键列表
+        
         for history_id, conv in reversed(self.conversation_history.items()):
             # 显示时间戳和用户问题的前20个字符
             preview = conv["user"][:20] + ("..." if len(conv["user"]) > 20 else "")
@@ -1103,7 +1162,9 @@ class CometIDE(QMainWindow):
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, history_id)  # 存储ID
             self.history_list.addItem(item)
-    
+            # 添加到历史键列表
+            self.history_keys.append(history_id)
+   
     def load_history_conversation(self, history_id):
         """加载历史对话 - 改进掐头去尾逻辑"""
         if history_id in self.conversation_history:
@@ -1138,9 +1199,9 @@ class CometIDE(QMainWindow):
                 cleaned_text = ai_response
             
             self.comet_response.setText(cleaned_text)
-            self.comet_input.setText(conv["user"])
+            # 注意：这里不自动填充用户输入到输入框，因为eventFilter已经处理了
             self.current_conversation_id = history_id
-    
+  
     def delete_history_item(self):
         """删除选中的历史记录 - 添加确认对话框"""
         current_item = self.history_list.currentItem()
@@ -1274,6 +1335,9 @@ class CometIDE(QMainWindow):
         self.comet_input.setPlaceholderText("输入您的要求...")
         self.comet_input.returnPressed.connect(self.send_to_comet)
         
+        # 在comet_input部分添加事件过滤器
+        self.comet_input.installEventFilter(self)
+        
         self.send_button = QPushButton("发送")
         self.send_button.clicked.connect(self.send_to_comet)
         
@@ -1351,7 +1415,58 @@ class CometIDE(QMainWindow):
         
         # 初始化历史列表
         self.update_history_list()
-    
+        
+    def eventFilter(self, obj, event):
+        """事件过滤器，用于处理Comet输入框的上下键浏览对话历史"""
+        if obj == self.comet_input and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Up:
+                # 上键：向前浏览历史对话
+                if not self.conversation_history:
+                    return False
+                    
+                # 如果还没有开始浏览，保存当前输入
+                if self.history_browse_index == -1:
+                    self.current_input = self.comet_input.text()
+                
+                # 更新浏览索引
+                if self.history_browse_index < len(self.history_keys) - 1:
+                    self.history_browse_index += 1
+                    # 获取对应的历史ID
+                    history_id = self.history_keys[self.history_browse_index]
+                    if history_id in self.conversation_history:
+                        # 加载用户输入到输入框
+                        self.comet_input.setText(self.conversation_history[history_id]["user"])
+                        # 同时加载AI回复到回复框
+                        self.load_history_conversation(history_id)
+                
+                return True
+                
+            elif event.key() == Qt.Key_Down:
+                # 下键：向后浏览历史对话
+                if not self.conversation_history or self.history_browse_index == -1:
+                    return False
+                    
+                # 更新浏览索引
+                if self.history_browse_index > 0:
+                    self.history_browse_index -= 1
+                    # 获取对应的历史ID
+                    history_id = self.history_keys[self.history_browse_index]
+                    if history_id in self.conversation_history:
+                        # 加载用户输入到输入框
+                        self.comet_input.setText(self.conversation_history[history_id]["user"])
+                        # 同时加载AI回复到回复框
+                        self.load_history_conversation(history_id)
+                elif self.history_browse_index == 0:
+                    # 回到当前输入
+                    self.history_browse_index = -1
+                    self.comet_input.setText(self.current_input)
+                    # 清空AI回复框
+                    self.comet_response.clear()
+                
+                return True
+                
+        return super().eventFilter(obj, event)
+  
     def toggle_history_panel(self):
         """切换历史记录侧边栏的显示/隐藏 - 改进折叠逻辑"""
         if self.history_panel.width() > 60:  # 当前展开状态
@@ -2096,14 +2211,28 @@ class CometIDE(QMainWindow):
         self.stop_button.setEnabled(True)
         self.is_running = True
         
-        # === 检测是否需要交互式输入 ===
-        if "input(" in code:
+        # === 检测是否需要交互式输入 - 改进版，跳过注释行 ===
+        has_input_call = False
+        lines = code.split('\n')
+        
+        for line in lines:
+            # 跳过注释行
+            stripped_line = line.strip()
+            if stripped_line.startswith('#'):
+                continue
+            
+            # 检查是否包含input调用
+            if 'input(' in stripped_line:
+                has_input_call = True
+                break
+        
+        if has_input_call:
             # 如果检测到 input 调用，则通过自动保存的文件进行交互式执行
             self.execute_with_input(code)
         else:
             # 原有逻辑：在新线程中执行非交互式代码
             self.execute_non_interactive(code)
-    
+  
     def execute_with_input(self, code):
         """执行需要用户交互输入的代码 - 简化为直接在cmd/终端中运行"""
         try:
@@ -2419,6 +2548,12 @@ class CometIDE(QMainWindow):
         # 重置修复模式标志
         self.is_fix_mode = False
         
+        # 保存当前输入框内容（用于重置浏览索引时恢复）
+        self.current_input = user_input
+        
+        # 重置浏览索引
+        self.history_browse_index = -1
+        
         # 构建提示词
         base_prompt = f"""请严格遵守以下规则：要求是{user_input}。请根据要求只输出极简风格的python代码，并搭配逐行注释。"""
         
@@ -2428,11 +2563,11 @@ class CometIDE(QMainWindow):
             if current_code.strip():
                 final_prompt = f"""{base_prompt}
 
-当前编辑器中的代码如下，可供参考：
+    当前编辑器中的代码如下，可供参考：
 
-{current_code}
+    {current_code}
 
-"""
+    """
         
         # 保存用户输入（用于后续添加到历史）
         self.last_user_input = user_input
@@ -2481,7 +2616,7 @@ class CometIDE(QMainWindow):
         thread = threading.Thread(target=make_request)
         thread.daemon = True
         thread.start()
-    
+  
     def update_comet_response(self, response_text):
         """更新AI响应显示（线程安全）"""
         # 统一处理：去掉可能存在的首尾格式说明行
@@ -3011,160 +3146,191 @@ class CometIDE(QMainWindow):
             import traceback
             traceback_str = traceback.format_exc()
             self.console_update_signal.emit(f"详细错误: {traceback_str}", "failure")
-            
+
     def show_about(self):
-        """显示关于对话框"""
+        """显示关于对话框 - 简洁版本"""
         about_text = """
-        <h2>PyComet</h2>
-        <p>版本: 1.4.0</p>
-        <p>一个轻量级的Python集成开发环境</p>
-        <p>功能特点:</p>
+        <div style="text-align: center; padding: 20px;">
+            <h2 style="color: #4CAF50;">PyComet 1.5.0</h2>
+            <p><b>一个轻量级的Python集成开发环境</b></p>
+            <p>© 2026 PyComet</p>
+        </div>
+        
+        <h3>✨ 1.5.0版本新增功能：</h3>
         <ul>
-            <li>轻量级Python代码编辑与运行</li>
-            <li>AI代码助手(Comet)</li>
-            <li>智能错误修复功能</li>
-            <li>语法高亮和自动缩进</li>
-            <li>自动保存功能</li>
-            <li>支持交互式输入 - 通过外部终端</li>
-            <li>强制停止运行功能</li>
-            <li>常用编辑快捷键</li>
-            <li>应用打包功能</li>
-            <li>对话历史管理（可折叠侧边栏）</li>
-            <li>关键词自动补全（支持模糊查询）</li>
+            <li><b>引号和括号自动补全</b> - 输入时自动补全并定位光标</li>
+            <li><b>优化的input检测</b> - 跳过注释行检测input()函数</li>
+            <li><b>Comet历史对话浏览</b> - 上下键浏览历史对话</li>
         </ul>
-        <p>© 2026 PyComet</p>
+        
+        <h3>🔑 核心功能：</h3>
+        <ul>
+            <li>Python代码编辑与运行</li>
+            <li>AI代码生成与修复（Comet助手）</li>
+            <li>对话历史管理（最多50条）</li>
+            <li>深色/浅色主题切换</li>
+            <li>应用打包功能</li>
+        </ul>
+        
+        <h3>⌨️ 常用快捷键：</h3>
+        <ul>
+            <li>运行代码：Ctrl+Enter</li>
+            <li>保存文件：Ctrl+S</li>
+            <li>注释/取消注释：Ctrl+/</li>
+            <li>浏览历史对话：↑↓（在Comet输入框）</li>
+        </ul>
+        
+        <div style="margin-top: 20px; text-align: center; color: #666; font-size: 12px;">
+            需要Python 3.7+ 和 智谱AI API密钥
+        </div>
         """
         
         QMessageBox.about(self, "关于PyComet", about_text)
-    
+
     def show_help(self):
         """显示帮助对话框 - 更新包含所有新功能"""
         help_text = """
-        <h2>PyComet 使用帮助</h2>
-        
-        <h3>基本操作:</h3>
+    <h2>PyComet 使用帮助</h2>
+    
+    <h3>基本操作:</h3>
+    <ul>
+        <li><b>运行代码:</b> 点击菜单栏的运行->运行代码或按Ctrl+Enter</li>
+        <li><b>打开文件:</b> 点击菜单栏的文件->打开或按Ctrl+O</li>
+        <li><b>保存文件:</b> 点击菜单栏的文件->保存或按Ctrl+S</li>
+        <li><b>另存为文件:</b> 点击菜单栏的文件->另存为或按Ctrl+Shift+S</li>
+        <li><b>打包应用:</b> 点击菜单栏的文件->打包应用</li>
+    </ul>
+    
+    <h3>编辑快捷键:</h3>
+    <ul>
+        <li><b>注释/取消注释:</b> Ctrl+/</li>
+        <li><b>复制行:</b> Ctrl+D</li>
+        <li><b>撤销:</b> Ctrl+Z</li>
+        <li><b>重做:</b> Ctrl+Y 或 Ctrl+Shift+Z</li>
+        <li><b>增加缩进:</b> Tab</li>
+        <li><b>减少缩进:</b> Ctrl+Tab</li>
+        <li><b>放大字体:</b> Ctrl++ 或 Ctrl+滚轮向上</li>
+        <li><b>缩小字体:</b> Ctrl+- 或 Ctrl+滚轮向下</li>
+    </ul>
+    
+    <h3>AI助手(Comet):</h3>
+    <ul>
+        <li>在右侧Comet面板的输入框中描述您的需求</li>
+        <li>点击"发送"按钮或按Enter键提交</li>
+        <li>AI生成的代码会显示在响应区域</li>
+        <li>点击"采用"按钮将代码插入到编辑器中</li>
+        <li>勾选"附当前代码"可将编辑器代码随请求发送</li>
+        <li><b>历史对话浏览:</b> 在Comet输入框中使用↑↓键浏览历史对话</li>
         <ul>
-            <li><b>运行代码:</b> 点击菜单栏的运行->运行代码或按Ctrl+Enter</li>
-            <li><b>打开文件:</b> 点击菜单栏的文件->打开或按Ctrl+O</li>
-            <li><b>保存文件:</b> 点击菜单栏的文件->保存或按Ctrl+S</li>
-            <li><b>另存为文件:</b> 点击菜单栏的文件->另存为或按Ctrl+Shift+S</li>
-            <li><b>打包应用:</b> 点击菜单栏的文件->打包应用</li>
+            <li>按↑键：加载最近一次的对话历史到输入框，同时显示对应的AI回复</li>
+            <li>继续按↑键：浏览更早的历史对话</li>
+            <li>按↓键：浏览更新的历史对话</li>
+            <li>当浏览到最新的对话时，按↓键会恢复到当前输入</li>
         </ul>
-        
-        <h3>编辑快捷键:</h3>
+    </ul>
+    
+    <h3>对话历史功能:</h3>
+    <ul>
+        <li>点击历史记录可重新加载该次对话</li>
+        <li>支持删除单条记录或清空全部历史</li>
+        <li>点击"◀"按钮可折叠侧边栏，点击"▶"按钮展开</li>
+        <li>历史记录自动保存，最多保存50条</li>
+    </ul>
+    
+    <h3>关键词自动补全:</h3>
+    <ul>
+        <li><b>功能:</b> 代码编辑器支持关键词自动补全</li>
+        <li><b>触发:</b> 输入2个字符后触发补全提示</li>
+        <li><b>匹配规则:</b> 支持前缀匹配和子序列模糊匹配</li>
+        <li><b>交互操作:</b></li>
         <ul>
-            <li><b>注释/取消注释:</b> Ctrl+/</li>
-            <li><b>复制行:</b> Ctrl+D</li>
-            <li><b>撤销:</b> Ctrl+Z</li>
-            <li><b>重做:</b> Ctrl+Y 或 Ctrl+Shift+Z</li>
-            <li><b>增加缩进:</b> Tab</li>
-            <li><b>减少缩进:</b> Ctrl+Tab</li>
-            <li><b>放大字体:</b> Ctrl++ 或 Ctrl+滚轮向上</li>
-            <li><b>缩小字体:</b> Ctrl+- 或 Ctrl+滚轮向下</li>
+            <li>使用↑↓键选择候选词</li>
+            <li>回车键确认选择</li>
+            <li>Esc键取消补全列表</li>
+            <li>输入分隔符自动隐藏列表</li>
         </ul>
-        
-        <h3>AI助手(Comet):</h3>
+        <li><b>关键词来源:</b></li>
         <ul>
-            <li>在右侧Comet面板的输入框中描述您的需求</li>
-            <li>点击"发送"按钮或按Enter键提交</li>
-            <li>AI生成的代码会显示在响应区域</li>
-            <li>点击"采用"按钮将代码插入到编辑器中</li>
-            <li>勾选"附当前代码"可将编辑器代码随请求发送</li>
+            <li>内置Python关键字和常用函数</li>
+            <li>从当前文档自动提取完整标识符</li>
+            <li>只收录长度≥3的有效Python标识符</li>
         </ul>
-        
-        <h3>对话历史功能:</h3>
-        <ul>
-            <li>点击历史记录可重新加载该次对话</li>
-            <li>支持删除单条记录或清空全部历史</li>
-            <li>点击"◀"按钮可折叠侧边栏，点击"▶"按钮展开</li>
-            <li>历史记录自动保存，最多保存50条</li>
-        </ul>
-        
-        <h3>关键词自动补全:</h3>
-        <ul>
-            <li><b>功能:</b> 代码编辑器支持关键词自动补全</li>
-            <li><b>触发:</b> 输入2个字符后触发补全提示</li>
-            <li><b>匹配规则:</b> 支持前缀匹配和子序列模糊匹配</li>
-            <li><b>交互操作:</b></li>
-            <ul>
-                <li>使用↑↓键选择候选词</li>
-                <li>回车键确认选择</li>
-                <li>Esc键取消补全列表</li>
-                <li>输入分隔符自动隐藏列表</li>
-            </ul>
-            <li><b>关键词来源:</b></li>
-            <ul>
-                <li>内置Python关键字和常用函数</li>
-                <li>从当前文档自动提取完整标识符</li>
-                <li>只收录长度≥3的有效Python标识符</li>
-            </ul>
-            <li><b>主题支持:</b> 补全菜单支持深色/浅色主题切换</li>
-        </ul>
-        
-        <h3>错误修复功能:</h3>
-        <ul>
-            <li>当代码运行出错时，控制台标题栏右侧会显示🔧修复按钮</li>
-            <li>点击按钮，AI会分析错误并提供修复后的完整代码</li>
-            <li>在修复模式下，点击"采用"按钮会替换所有代码</li>
-        </ul>
-        
-        <h3>交互式输入支持:</h3>
-        <ul>
-            <li>当代码中包含input()函数时，会自动启用交互式执行模式</li>
-            <li>系统会自动打开终端窗口执行此文件</li>
-        </ul>
-        
-        <h3>强制停止功能:</h3>
-        <ul>
-            <li>当程序正在运行时，控制台标题栏右侧会显示⏹️停止按钮</li>
-            <li>点击按钮可强制停止正在运行的程序</li>
-            <li>适用于长时间运行或陷入死循环的程序</li>
-        </ul>
-        
-        <h3>打包功能:</h3>
-        <ul>
-            <li>可将当前编辑器中的代码打包为独立的可执行文件</li>
-            <li>支持自定义应用名称和图标</li>
-            <li>自动检测并安装pyinstaller（如未安装）</li>
-            <li>生成单文件可执行程序，方便分发</li>
-        </ul>
-        
-        <h3>API密钥设置:</h3>
-        <ul>
-            <li>首次运行或API密钥无效时，会弹出设置对话框</li>
-            <li>您可以在"设置"菜单中随时更改API密钥</li>
-            <li>密钥保存在comet_config.json配置文件中</li>
-        </ul>
-        
-        <h3>自动保存与恢复:</h3>
-        <ul>
-            <li><b>自动保存:</b> 每30秒自动保存到.comet_ide_autosave.py文件</li>
-            <li><b>程序启动:</b> 自动加载.comet_ide_autosave.py文件中的内容</li>
-            <li><b>意外关闭:</b> 不清理自动保存文件，以便恢复上次的编辑</li>
-        </ul>
-        
-        <h3>代码编辑器功能:</h3>
-        <ul>
-            <li>Python语法高亮（关键字、字符串、注释、函数等）</li>
-            <li>行号显示</li>
-            <li>自动缩进（在行末输入冒号后回车自动缩进）</li>
-            <li>字体缩放功能（Ctrl++放大，Ctrl+-缩小，Ctrl+滚轮缩放）</li>
-            <li>智能关键词自动补全（如上述）</li>
-        </ul>
-        
-        <h3>控制台功能:</h3>
-        <ul>
-            <li>实时显示代码执行输出</li>
-            <li>彩色显示成功/失败信息</li>
-            <li>自动滚动到底部</li>
-            <li>支持复制控制台内容</li>
-        </ul>
-        
-        <h3>版本信息:</h3>
-        <p>PyComet 版本: 1.4.0</p>
-        <p>最后更新日期: 2026年</p>
-        <p>一个轻量级、功能丰富的Python集成开发环境</p>
-        """
+        <li><b>主题支持:</b> 补全菜单支持深色/浅色主题切换</li>
+    </ul>
+    
+    <h3><b>引号和括号自动补全</b></h3>
+    <ul>
+        <li><b>功能:</b> 自动补全引号和括号</li>
+        <li><b>触发:</b> 输入左引号或左括号时自动补全右引号/右括号</li>
+        <li><b>光标位置:</b> 自动将光标移动到引号/括号对中间</li>
+        <li><b>选中文本:</b> 如果有选中文本，会自动用对应的字符对包围选中文本</li>
+    </ul>
+    
+    <h3>错误修复功能:</h3>
+    <ul>
+        <li>当代码运行出错时，控制台标题栏右侧会显示🔧修复按钮</li>
+        <li>点击按钮，AI会分析错误并提供修复后的完整代码</li>
+        <li>在修复模式下，点击"采用"按钮会替换所有代码</li>
+    </ul>
+    
+    <h3>交互式输入支持:</h3>
+    <ul>
+        <li>当代码中包含input()函数时，会自动启用交互式执行模式</li>
+        <li>系统会自动打开终端窗口执行此文件</li>
+    </ul>
+    
+    <h3>强制停止功能:</h3>
+    <ul>
+        <li>当程序正在运行时，控制台标题栏右侧会显示⏹️停止按钮</li>
+        <li>点击按钮可强制停止正在运行的程序</li>
+        <li>适用于长时间运行或陷入死循环的程序</li>
+    </ul>
+    
+    <h3>打包功能:</h3>
+    <ul>
+        <li>可将当前编辑器中的代码打包为独立的可执行文件</li>
+        <li>支持自定义应用名称和图标</li>
+        <li>自动检测并安装pyinstaller（如未安装）</li>
+        <li>生成单文件可执行程序，方便分发</li>
+    </ul>
+    
+    <h3>API密钥设置:</h3>
+    <ul>
+        <li>首次运行或API密钥无效时，会弹出设置对话框</li>
+        <li>您可以在"设置"菜单中随时更改API密钥</li>
+        <li>密钥保存在comet_config.json配置文件中</li>
+    </ul>
+    
+    <h3>自动保存与恢复:</h3>
+    <ul>
+        <li><b>自动保存:</b> 每30秒自动保存到.comet_ide_autosave.py文件</li>
+        <li><b>程序启动:</b> 自动加载.comet_ide_autosave.py文件中的内容</li>
+        <li><b>意外关闭:</b> 不清理自动保存文件，以便恢复上次的编辑</li>
+    </ul>
+    
+    <h3>代码编辑器功能:</h3>
+    <ul>
+        <li>Python语法高亮（关键字、字符串、注释、函数等）</li>
+        <li>行号显示</li>
+        <li>自动缩进（在行末输入冒号后回车自动缩进）</li>
+        <li>字体缩放功能（Ctrl++放大，Ctrl+-缩小，Ctrl+滚轮缩放）</li>
+        <li>智能关键词自动补全（如上述）</li>
+        <li>引号和括号自动补全（如上述）</li>
+    </ul>
+    
+    <h3>控制台功能:</h3>
+    <ul>
+        <li>实时显示代码执行输出</li>
+        <li>彩色显示成功/失败信息</li>
+        <li>自动滚动到底部</li>
+        <li>支持复制控制台内容</li>
+    </ul>
+    
+    <h3>版本信息:</h3>
+    <p><b>PyComet 版本: 1.5.0</b></p>
+    <p>最后更新日期: 2026年4月</p>
+    <p>一个轻量级、功能丰富的Python集成开发环境</p>
+    """
         
         # 创建自定义对话框
         dialog = QDialog(self)
