@@ -18,4 +18,4 @@ Have Fun! Welcome any contact!!
 
 ➕️ Automatic 补全 of 引号、括号
 
-➕️ Broswering Comet Dialog History through ↑ & ↓ at Comet inputbox
+➕️ Browsing Comet Dialog History through ↑ & ↓ at Comet inputbox
