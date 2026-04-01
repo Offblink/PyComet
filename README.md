@@ -15,3 +15,5 @@ Have Fun! Welcome any contact!!
 # 4.1
 
 ➕️ Intelligent 代码补全 function
+➕️ Automatic 补全 of 引号、括号
+➕️ Brosweing Comet Dialog History through ↑ & ↓ at Comet inputbox
