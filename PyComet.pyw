@@ -2277,9 +2277,25 @@ class CometIDE(QMainWindow):
             self.console_update_signal.emit(f"处理交互式代码失败: {e}", "failure")
             self.has_error = True
             QMetaObject.invokeMethod(self.fix_button, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
-    
+
+    def has_input_calls(self, code):
+        """检测代码中是否包含input调用 - 复用运行代码中的检测逻辑"""
+        lines = code.split('\n')
+        
+        for line in lines:
+            # 跳过注释行
+            stripped_line = line.strip()
+            if stripped_line.startswith('#'):
+                continue
+            
+            # 检查是否包含input调用
+            if 'input(' in stripped_line:
+                return True
+        
+        return False
+
     def execute_non_interactive(self, code):
-        """执行非交互式代码 - 修复打包后的问题"""
+        """执行非交互式代码 - 修复打包后 stdin 丢失问题"""
         # 创建临时文件
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
             f.write(code)
@@ -2301,13 +2317,26 @@ class CometIDE(QMainWindow):
                     python_cmd = sys.executable
                                 
                 # 使用subprocess.Popen执行
-                self.non_interactive_process = subprocess.Popen(
-                    [python_cmd, temp_file],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1
-                )
+                # 修复：在打包环境中，需要正确处理标准输入
+                if is_frozen:
+                    # 在打包环境中，将stdin重定向到空设备
+                    self.non_interactive_process = subprocess.Popen(
+                        [python_cmd, temp_file],
+                        stdin=subprocess.DEVNULL,  # 修复：重定向stdin
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1
+                    )
+                else:
+                    # 在开发环境中，保持原有行为
+                    self.non_interactive_process = subprocess.Popen(
+                        [python_cmd, temp_file],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1
+                    )
                 
                 # 实时读取输出
                 stdout_lines = []
@@ -2377,7 +2406,7 @@ class CometIDE(QMainWindow):
         thread = threading.Thread(target=execute)
         thread.daemon = True
         thread.start()
-    
+   
     def stop_running(self):
         """强制停止正在运行的程序"""
         if not self.is_running:
@@ -2826,7 +2855,7 @@ class CometIDE(QMainWindow):
         self.editor_panel.completer.clear_dynamic()
     
     def package_app(self):
-        """打包应用程序"""
+        """打包应用程序 - 改进版，检测输入调用并分配不同打包指令"""
         # 1. 获取当前代码
         current_code = self.editor_panel.toPlainText()
         
@@ -2834,24 +2863,34 @@ class CometIDE(QMainWindow):
             QMessageBox.warning(self, "无代码", "编辑器中没有代码，无法打包")
             return
         
-        # 2. 显示打包配置对话框
+        # 2. 检测代码中是否包含input调用
+        has_input = self.has_input_calls(current_code)
+        
+        # 3. 显示打包配置对话框
         dialog = PackageDialog(self)
         if dialog.exec_() != QDialog.Accepted:
             return
         
-        # 3. 获取用户输入的打包信息
+        # 4. 获取用户输入的打包信息
         app_name, icon_path = dialog.get_package_info()
         
         if not app_name:
             QMessageBox.warning(self, "输入错误", "应用名称不能为空")
             return
         
-        # 4. 在控制台显示开始打包信息
+        # 5. 在控制台显示开始打包信息
         self.console_update_signal.emit("=" * 50, "normal")
         self.console_update_signal.emit(f"开始打包应用: {app_name}", "normal")
+        
+        # 根据检测结果显示不同提示
+        if has_input:
+            self.console_update_signal.emit("检测到input()调用，将使用--console模式打包", "normal")
+        else:
+            self.console_update_signal.emit("未检测到input()调用，将使用--windowed模式打包", "normal")
+        
         self.console_update_signal.emit("=" * 50, "normal")
         
-        # 5. 确保自动保存文件是最新的
+        # 6. 确保自动保存文件是最新的
         try:
             with open(".comet_ide_autosave.py", 'w', encoding='utf-8') as f:
                 f.write(current_code)
@@ -2860,31 +2899,28 @@ class CometIDE(QMainWindow):
             self.console_update_signal.emit(f"✗ 更新自动保存文件失败: {e}", "failure")
             return
         
-        # 6. 处理图标文件
+        # 7. 处理图标文件
         icon_dest = None
         if icon_path and os.path.exists(icon_path):
             try:
                 import shutil
-                # 获取原始图标文件名
                 original_icon_name = os.path.basename(icon_path)
                 icon_dest = original_icon_name
                 
-                # 复制图标文件到当前目录
                 shutil.copy2(icon_path, icon_dest)
                 self.console_update_signal.emit(f"✓ 已复制图标文件: {icon_dest}", "normal")
             except Exception as e:
                 self.console_update_signal.emit(f"✗ 复制图标文件失败: {e}", "failure")
-                # 不因为图标失败而停止打包
                 icon_dest = None
         
-        # 7. 在新线程中执行打包
+        # 8. 在新线程中执行打包，传递has_input参数
         thread = threading.Thread(target=self.execute_packaging_thread, 
-                                 args=(app_name, icon_dest))
+                                 args=(app_name, icon_dest, has_input))
         thread.daemon = True
         thread.start()
-    
-    def execute_packaging_thread(self, app_name, icon_dest):
-        """执行打包的线程函数"""
+
+    def execute_packaging_thread(self, app_name, icon_dest, has_input):
+        """执行打包的线程函数 - 根据是否有input调用使用不同指令"""
         try:
             # 1. 检查pyinstaller是否已安装
             self.console_update_signal.emit("检查pyinstaller安装状态...", "normal")
@@ -2892,8 +2928,8 @@ class CometIDE(QMainWindow):
                 self.console_update_signal.emit("打包失败：pyinstaller相关错误", "failure")
                 return
             
-            # 2. 构建pyinstaller命令
-            pyinstaller_cmd = self.build_pyinstaller_command(app_name, icon_dest)
+            # 2. 构建pyinstaller命令，传递has_input参数
+            pyinstaller_cmd = self.build_pyinstaller_command(app_name, icon_dest, has_input)
             
             # 3. 执行打包命令
             self.console_update_signal.emit("正在执行打包命令...", "normal")
@@ -2913,27 +2949,36 @@ class CometIDE(QMainWindow):
             import traceback
             traceback_str = traceback.format_exc()
             self.console_update_signal.emit(f"详细错误信息: {traceback_str}", "failure")
-    
+
     def check_pyinstaller(self):
-        """检查并安装pyinstaller"""
+        """检查并安装pyinstaller - 改进版，支持打包环境"""
         try:
-            # 尝试导入pyinstaller
-            import subprocess
+            # 判断是否处于打包环境
+            is_frozen = getattr(sys, 'frozen', False)
+            
+            if is_frozen:
+                # 打包环境中，使用系统Python检查pyinstaller
+                python_cmd = 'python'
+            else:
+                # 开发环境中，使用当前解释器
+                python_cmd = sys.executable
+            
+            # 尝试检查pyinstaller是否可用
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "show", "pyinstaller"],
+                [python_cmd, "-c", "import PyInstaller; print('PyInstaller version:', PyInstaller.__version__)"],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
             
             if result.returncode == 0:
-                self.console_update_signal.emit("✓ pyinstaller 已安装", "normal")
+                self.console_update_signal.emit(f"✓ pyinstaller 已安装 ({result.stdout.strip()})", "normal")
                 return True
             else:
                 self.console_update_signal.emit("检测到pyinstaller未安装，正在自动安装...", "normal")
                 
                 # 安装pyinstaller
-                install_cmd = [sys.executable, "-m", "pip", "install", "pyinstaller"]
+                install_cmd = [python_cmd, "-m", "pip", "install", "pyinstaller"]
                 
                 process = subprocess.Popen(
                     install_cmd,
@@ -2964,14 +3009,21 @@ class CometIDE(QMainWindow):
         except Exception as e:
             self.console_update_signal.emit(f"✗ 检查pyinstaller时发生错误: {e}", "failure")
             return False
-    
-    def build_pyinstaller_command(self, app_name, icon_dest):
-        """构建pyinstaller命令"""
+   
+    def build_pyinstaller_command(self, app_name, icon_dest, has_input):
+        """构建pyinstaller命令 - 根据是否有input调用分配不同指令"""
         cmd = ["pyinstaller"]
         
-        # 添加基本参数
+        # 根据检测结果使用不同的打包指令
+        if has_input:
+            # 有input调用，使用--console模式
+            cmd.append("--console")
+        else:
+            # 无input调用，使用--windowed模式
+            cmd.append("--windowed")
+        
+        # 添加其他参数
         cmd.extend([
-            "--windowed",   # 窗口应用
             "--onefile",    # 单文件
             "--clean",      # 清理缓存
             "--noconfirm",  # 不确认覆盖
@@ -2990,11 +3042,15 @@ class CometIDE(QMainWindow):
         cmd.append(".comet_ide_autosave.py")
         
         return cmd
-    
-    def run_pyinstaller_command(self, cmd):
-        """执行pyinstaller命令"""
+
+    def run_pyinstaller_command(self, cmd, is_frozen=False):
+        """执行pyinstaller命令 - 改进版，支持打包环境"""
         import subprocess
-        import shlex
+        
+        # 判断是否处于打包环境
+        if is_frozen:
+            # 打包环境中，需要特别注意
+            self.console_update_signal.emit("注意：当前处于打包环境，正在通过系统Python执行pyinstaller", "normal")
         
         # 在Windows上需要将命令列表转换为字符串
         if platform.system() == "Windows":
@@ -3059,7 +3115,7 @@ class CometIDE(QMainWindow):
         else:
             self.console_update_signal.emit(f"✗ 打包命令执行失败，返回码: {process.returncode}", "failure")
             return False
-    
+   
     def organize_package_results(self, app_name, icon_dest):
         """整理打包结果"""
         try:
