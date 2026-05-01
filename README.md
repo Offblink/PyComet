@@ -19,3 +19,8 @@ Have Fun! Welcome any contact!!
 ➕️ Automatic 补全 of 引号、括号
 
 ➕️ Browsing Comet Dialog History through ↑ & ↓ at Comet inputbox
+
+## 5.1
+
+➕️ Supporting input contents below the console directly
+
