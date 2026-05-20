@@ -747,20 +747,27 @@ class CodeEditor(QPlainTextEdit):
                     self.completion_list.setCurrentRow(current_row + 1)
                 event.accept()
                 return
-            elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            elif event.key() == Qt.Key_Space:
+                # 空格键：插入选中的补全项
                 current_item = self.completion_list.currentItem()
                 if current_item:
                     self.insert_completion(current_item)
                 event.accept()
                 return
+            elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                # 回车键：关闭补全列表但不插入补全
+                self.hide_completion_list()
+                event.accept()
+                return
             elif event.key() == Qt.Key_Escape:
+                # ESC键：关闭补全列表
                 self.hide_completion_list()
                 event.accept()
                 return
             elif event.key() in (Qt.Key_Backspace, Qt.Key_Delete):
                 self.hide_completion_list()
                 # 继续处理删除操作
-            elif event.key() in (Qt.Key_Space, Qt.Key_Tab, Qt.Key_ParenLeft, 
+            elif event.key() in (Qt.Key_Tab, Qt.Key_ParenLeft, 
                                Qt.Key_ParenRight, Qt.Key_BracketLeft, Qt.Key_BracketRight,
                                Qt.Key_BraceLeft, Qt.Key_BraceRight, Qt.Key_Comma, 
                                Qt.Key_Colon, Qt.Key_Period, Qt.Key_Semicolon):
