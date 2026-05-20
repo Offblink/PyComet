@@ -28,3 +28,7 @@ Have Fun! Welcome any contact!!
 
 ➕️ WorkPlace
 
+## 5.20
+
+➕️ 将确认自动补全热键改为空格，原回车关闭菜单
+
